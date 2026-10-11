@@ -108,7 +108,8 @@ Warstwa UI profili webowych: TypeScript + React + dockview (+ CodeMirror 6 w try
 | `PROJECT_CORE.md` | **ten dokument**: fundament, zasady, decyzje zamknięte, model forków |
 | `PROJECT_BRIEF_v4.md` | profil Agent Edition — aktywny (etapy, spike'i, UI kokpitu) |
 | `PROJECT_BRIEF_v3.md` | profil Classic Edition — uśpiony (etapy klasycznego IDE) |
-| `PROJECT_BRIEF.md`, `PROJECT_BRIEF_v2.md` | archiwum iteracji |
+
+Iteracje v1–v2 zostały wchłonięte przez §6 i usunięte z katalogu roboczego; pełna treść dostępna w historii gita.
 
 ## 8. Otwarte kwestie globalne
 
