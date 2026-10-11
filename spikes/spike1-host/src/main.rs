@@ -8,7 +8,9 @@
 //!                     text frames = JSON control: {"t":"hello"|"resize","cols","rows"}
 //!   server -> client: binary frames = PTY output bytes;
 //!                     text frames = JSON: {"t":"out"|... } reserved, {"t":"ev","event":{...}}
-//!                     for session-tail events, {"t":"info",...} for host notices.
+//!                     for session-tail events, {"t":"info",...} for host notices,
+//!                     {"t":"ctl",...} for control acks (e.g. resize ok/err from
+//!                     `pty_master.resize()`, asserted by the e2e driver as A2 evidence).
 //!
 //! Exploratory spike code: minimal error handling, no auth on the sockets.
 
@@ -26,6 +28,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
+use spike1_host::dsr::DsrOwnership;
 use spike1_host::events::{entry_to_events, parse_line};
 use spike1_host::tail::SessionDirWatcher;
 
@@ -41,11 +44,16 @@ struct Hub {
 impl Hub {
     fn resize(&self, cols: u16, rows: u16) {
         let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-        if let Err(e) = self.pty_master.lock().unwrap().resize(size) {
-            eprintln!("[host] pty resize failed: {e}");
-        } else {
-            eprintln!("[host] pty resized to {cols}x{rows}");
-        }
+        let (ok, err) = match self.pty_master.lock().unwrap().resize(size) {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        // Control ack: clients (e2e driver, browser page) can assert the
+        // resize was actually accepted by the PTY, not merely sent over WS.
+        self.announce(json!({
+            "t": "ctl", "msg": "resize", "cols": cols, "rows": rows,
+            "ok": ok, "err": err,
+        }));
     }
 
     fn write_input(&self, bytes: &[u8]) {
@@ -122,6 +130,20 @@ fn main() -> Result<()> {
     cmd.cwd(&spike_dir);
     cmd.env("TERM", "xterm-256color");
     cmd.env("PI_SKIP_VERSION_CHECK", "1");
+    // Isolate pi's persistent STATE (project trust, MCP project-server
+    // approvals, settings, model catalog) inside the spike instead of the
+    // user's global ~/.pi/agent — the spike must not write to global config.
+    // This is state isolation, NOT an access barrier: pi still runs with the
+    // host user's normal file access. Credentials/model catalog are seeded
+    // into this dir by the operator (see README "Granica sandboxa").
+    // SPIKE1_AGENT_HOME=0 deliberately opts out to the global pi dir instead.
+    let mut agent_home = run_dir.join("agent-home");
+    if std::env::var_os("SPIKE1_AGENT_HOME").map(|v| v == "0").unwrap_or(false) {
+        agent_home = home_agent_dir();
+    }
+    std::fs::create_dir_all(&agent_home).context("create agent-home")?;
+    cmd.env("PI_CODING_AGENT_DIR", &agent_home);
+    eprintln!("[host] PI_CODING_AGENT_DIR -> {}", agent_home.display());
     // Scrub pi-injected session markers inherited from *our* parent (this host
     // may itself run inside a pi bash tool). pi re-sets PI_SESSION_* for its own
     // tool children, but subagent markers would otherwise leak in uncleaned.
@@ -163,6 +185,9 @@ fn main() -> Result<()> {
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut buf = [0u8; 16384];
+            // DSR answer-ownership per probe, decided atomically with the
+            // delivery of each chunk (rule + tests: src/dsr.rs).
+            let mut dsr = DsrOwnership::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -170,7 +195,22 @@ fn main() -> Result<()> {
                         break;
                     }
                     Ok(n) => {
-                        let _ = hub.pty_out.send(buf[..n].to_vec());
+                        // `send` returns, under the channel lock, how many
+                        // subscribers actually received this chunk (a failed
+                        // send delivered nothing -> 0). DsrOwnership::observe
+                        // accumulates delivery of ALL fragments of a probe —
+                        // which can split across reads (`ESC[6` + `n`) — and
+                        // says whether the host must answer it: a probe is
+                        // left to the attached emulators only if every chunk
+                        // of it reached >=1 client. A client attaching between
+                        // fragments never saw the probe start and will not
+                        // answer, so without this the host would stay silent
+                        // and pi would hang on the blocking probe.
+                        let delivered = hub.pty_out.send(buf[..n].to_vec()).unwrap_or(0);
+                        if dsr.observe(&buf[..n], delivered) {
+                            eprintln!("[host] DSR probe had a fragment delivered to no ws client -> host answers ESC[1;1R");
+                            hub.write_input(b"\x1b[1;1R");
+                        }
                     }
                     Err(e) => {
                         hub.announce(json!({"t": "info", "msg": format!("pty read error: {e}")}));
@@ -214,6 +254,7 @@ fn main() -> Result<()> {
                                 let Some(entry) = parse_line(&line) else { continue };
                                 for ev in entry_to_events(&entry) {
                                     let wrapped = json!({
+                                        "t": "ev",
                                         "ts": iso_now(),
                                         "src": "session-tail",
                                         "file": path.file_name().map(|s| s.to_string_lossy()),
@@ -493,6 +534,15 @@ async fn handle_ws(stream: TcpStream, addr: SocketAddr, hub: Arc<Hub>) {
         }
     }
     eprintln!("[host] ws client {addr} disconnected");
+}
+
+/// Global pi agent dir (same default pi uses: ~/.pi/agent).
+fn home_agent_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".pi").join("agent")
 }
 
 /// ISO-8601 UTC timestamp without external crates.

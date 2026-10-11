@@ -3,5 +3,6 @@
 //!
 //! Not production code. See README.md for scope and evidence.
 
+pub mod dsr;
 pub mod events;
 pub mod tail;
