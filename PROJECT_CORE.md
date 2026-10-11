@@ -92,6 +92,7 @@ Warstwa UI profili webowych: TypeScript + React + dockview (+ CodeMirror 6 w try
 | Praca solo, granice crate'ów zespołowo-gotowe | mniej abstrakcji teraz, przepisywanie później niepotrzebne |
 | PWA odłożona, architektura wspiera za darmo | transport wymienny + agent-daemon |
 | Monaco jako plan awaryjny edytora | gdyby customizacja CM6 okazała się droższa niż zakładamy |
+| Licencja: **Apache-2.0** | jawny patent grant, warunki kontrybucji (§5), klauzula znaków towarowych (§6 — nazwa „Tiller" nie jest licencjonowana), corporate allowlisty; MIT odrzucony dla prostoty na rzecz szczegołowości |
 
 ## 6. Historia decyzji
 
