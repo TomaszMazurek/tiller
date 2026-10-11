@@ -119,5 +119,6 @@ Iteracje v1–v2 zostały wchłonięte przez §6 i usunięte z katalogu roboczeg
 ## 8. Otwarte kwestie globalne
 
 - Poziom autonomii agentów: bramki vs review po fakcie (profil agent).
-- Sandbox na Windows: WSL2 vs ograniczenia procesu (Spike 5 profilu agent).
+- Sandbox na Windows: WSL2 vs ograniczenia procesu (Spike 5 profilu agent; odroczony do daemon/remote — PIVOT briefu v4 §7).
+- Host laboratoryjny Windows 7 (2026-10-11): desktop/core wymagają Win10+ (Rust-msvc ≥1.78, ConPTY ≥ Win10 1809, WebView2 EOL na 109). Na hoście działa Node 22 przez VxKex, pi i codex, przeglądarka Supermium (nowoczesny Chromium). Desktop Tiller na Win7 odrzucony; kandydacka rola: host agentów standalone/RPC z obserwacją zdalną oraz — eksperymentalnie, po P8 — agent-daemon pod VxKex z UI przez profil daemon/PWA w Supermium. Do rozstrzygnięcia: tryb pracy hosta (codzienny vs laboratoryjny) i łączność LAN.
 - Moment włączenia C++ (clangd) i dodatkowych adapterów agentów.
