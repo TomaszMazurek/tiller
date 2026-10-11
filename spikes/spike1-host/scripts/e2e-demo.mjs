@@ -12,6 +12,7 @@ import WebSocket from "ws";
 import { writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { firstTurnFinalAssistantEnd, makeDsrDetector } from "./e2e-lib.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const runDir = join(root, ".pi-run");
@@ -51,6 +52,7 @@ const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
 ws.binaryType = "nodebuffer";
 
 let firstByteAt = null;
+let ctlResize = null; // last {"t":"ctl","msg":"resize"} ack from the host
 const waiters = [];
 function notifyWaiters() {
   for (let i = waiters.length - 1; i >= 0; i--) {
@@ -90,6 +92,15 @@ ws.on("message", (data, isBinary) => {
       log(`first PTY output byte received (${data.length} bytes)`);
     }
     tuiChunks.push(data);
+    // xterm.js parity: answer the terminal's DSR cursor-position probe, in case
+    // pi re-probes while we are attached (the host leaves a probe to the
+    // emulators only when every fragment of it was delivered to a client).
+    // The detector's tail buffer catches a probe split across WS frames
+    // (makeDsrDetector in e2e-lib.mjs; latin1 keeps bytes 1:1).
+    if (dsrProbe(data.toString("latin1"))) {
+      ws.send(Buffer.from("\x1b[1;1R", "utf8"));
+      log("answered DSR probe ESC[1;1R");
+    }
     notifyWaiters();
   } else {
     try {
@@ -100,6 +111,13 @@ ws.on("message", (data, isBinary) => {
         events.push(v);
         log(`ev#${v.seq} ${v.event?.type} ${v.event?.toolName ?? v.event?.role ?? ""} ${v.event?.preview ? JSON.stringify(String(v.event.preview).slice(0, 90)) : ""}`);
         notifyWaiters();
+      } else if (v.t === "ctl") {
+        // Control acks from the host (currently: result of pty_master.resize()).
+        if (v.msg === "resize") {
+          ctlResize = v;
+          log(`ctl: resize ${v.cols}x${v.rows} ok=${v.ok}${v.err ? ` err=${String(v.err)}` : ""}`);
+          notifyWaiters();
+        }
       } else if (v.t === "info") {
         log(`info: ${v.msg ?? ""} ${v.path ?? ""}`);
       }
@@ -107,24 +125,92 @@ ws.on("message", (data, isBinary) => {
   }
 });
 
-const type = (text) => ws.send(Buffer.from(text, "utf8"));
+// xterm.js parity: long single-burst writes into pi's composer are sometimes
+// dropped; type long strings in small chunks (see README pitfall 9).
+const type = async (text) => {
+  if (text.length <= 32) { ws.send(Buffer.from(text, "utf8")); return; }
+  for (let i = 0; i < text.length; i += 16) {
+    ws.send(Buffer.from(text.slice(i, i + 16), "utf8"));
+    await sleep(40);
+  }
+};
 const enter = () => type("\r");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const sendPrompt = async (marker, prompt, timeoutMs = 180000) => {
+const dsrProbe = makeDsrDetector();
+
+let lastReply = { markerSeen: false, preview: "" };
+// Exchanges that completed AFTER the mid-session resize WITH the marker
+// confirmed in the turn-final reply (hard assertion) — the honest A2
+// evidence ("resize accepted by the PTY [ctl:ok]; session survived"),
+// collected as the run progresses instead of being recorded unconditionally.
+const postResizeExchanges = [];
+
+// Marker-as-hard-assertion (review round 2): a B/C/D exchange whose turn-final
+// reply lacks the expected marker is recorded as FAIL for that exchange AND
+// excluded from postResizeExchanges — A2 can no longer pass on unconfirmed
+// replies. (E stays best-effort: its marker can fall out of the truncated
+// 200-char event preview; the full session JSONL is the authoritative check
+// there, as documented in the README.)
+const confirmExchange = (id, marker, stepMs) => {
+  const ok = lastReply.markerSeen;
+  record(id, `turn-final reply contains marker ${marker} (hard assertion)`, ok,
+    ok ? `marker confirmed in the turn-final reply (stopReason=${lastReply.stopReason}); step ${stepMs} ms`
+       : `marker MISSING from the turn-final reply (stopReason=${lastReply.stopReason}); preview may be truncated to 200 chars — inspect the session JSONL; step ${stepMs} ms; preview: ${JSON.stringify(lastReply.preview)}`);
+  if (ok) postResizeExchanges.push(id);
+  return ok;
+};
+
+const sendPrompt = async (marker, prompt, timeoutMs = 240000) => {
   const sentAt = Date.now();
-  type(prompt);
+  const promptTail = prompt.slice(-24);
+  const assistantEnds = () =>
+    events.filter((e) => e.event?.type === "message_end" && e.event?.role === "assistant");
+  const before = assistantEnds().length;
+  // Type-and-verify: keystrokes sent right after a resize (or while pi is
+  // mid-turn) can be dropped while the TUI re-lays out. Verify the prompt was
+  // echoed into the composer, retry once.
+  let typed = false;
+  for (let attempt = 1; attempt <= 3 && !typed; attempt++) {
+    type(prompt);
+    await sleep(attempt === 1 ? 600 : 1200);
+    typed = tuiText().includes(promptTail);
+    if (!typed) {
+      log(`prompt not echoed in composer (attempt ${attempt}); re-typing`);
+      type("\x15"); // Ctrl+U: kill line
+      await sleep(400);
+    }
+  }
+  if (!typed) throw new Error(`prompt never echoed into composer: ${promptTail}`);
+  const submittedAt = Date.now();
   enter();
-  // wait until the marker token shows up in an assistant message_end preview
-  // (authoritative final text) or in the raw TUI stream
+  // Sync point: the TURN-FINAL assistant message_end — stopReason != "toolUse"
+  // (usually "stop"). A "toolUse" message_end only announces tool calls and
+  // can even carry text, so accepting any new non-empty message_end could
+  // mistake it for the final reply (evidence host-stdout-final-ABCDE.log: a
+  // toolUse end lands between the prompt and the real answer). The expected
+  // marker is checked separately below, as an assertion — never as the wait
+  // condition (matching it in the echoed prompt or the user bubble would be
+  // a false positive; the wait is on the authoritative session-tail event).
+  let reply = null;
   await waitFor(
-    `assistant reply containing ${marker}`,
-    () =>
-      events.some((e) => e.event?.type === "message_end" && e.event?.role === "assistant" &&
-        String(e.event?.preview ?? "").includes(marker)) ||
-      tuiText().includes(marker),
+    `turn-final assistant message_end (stopReason != toolUse) after prompt containing ${marker}`,
+    () => {
+      reply = firstTurnFinalAssistantEnd(assistantEnds().slice(before));
+      return !!reply;
+    },
     timeoutMs,
   );
+  lastReply = {
+    markerSeen: String(reply?.event?.preview ?? "").includes(marker),
+    stopReason: reply?.event?.stopReason ?? null,
+    preview: String(reply?.event?.preview ?? "").slice(0, 300),
+    replyMs: Date.now() - submittedAt,
+  };
+  if (!lastReply.markerSeen) {
+    log(`ASSERTION: marker ${JSON.stringify(marker)} NOT in the turn-final reply preview (stopReason=${lastReply.stopReason}; host truncates previews to 200 chars) — inspect the session JSONL for the full text`);
+  }
+  log(`assistant turn-final reply (${lastReply.replyMs} ms, stopReason=${lastReply.stopReason}, marker=${lastReply.markerSeen}): ${JSON.stringify(lastReply.preview.slice(0, 120))}`);
   return Date.now() - sentAt;
 };
 
@@ -133,23 +219,49 @@ async function main() {
   await new Promise((res, rej) => { ws.once("open", res); ws.once("error", rej); });
   log("ws connected");
 
+  // Mimic the browser client (web/index.html sends hello+resize on open).
+  // pi's TUI paints only after a window-size event, so without this the
+  // first-PTY-output wait below would time out even though pi is alive.
+  ws.send(JSON.stringify({ t: "hello", cols: 120, rows: 40 }));
+  log("sent hello 120x40 (browser parity)");
+
   // ---------- A: PTY hosting ----------
   await waitFor("first PTY output (pi banner)", () => firstByteAt !== null, 30000);
   const connectToFirstByteMs = firstByteAt - t0;
   // give the TUI a moment to finish drawing, then resize mid-session
   await sleep(3000);
+  ctlResize = null; // the hello-triggered ctl ack must not satisfy the check below
   ws.send(JSON.stringify({ t: "resize", cols: 100, rows: 30 }));
   log("sent resize 100x30 mid-session");
-  await sleep(1500);
+  // A2, part 1: the host acks every resize with a {"t":"ctl"} message carrying
+  // the real result of pty_master.resize(). Assert it — non-fatally: the
+  // outcome lands in the A2 record after D1.
+  try {
+    await waitFor("host ctl ack for resize (t:ctl, msg:resize, cols:100, rows:30, ok:true)",
+      () => ctlResize?.ok === true && ctlResize?.cols === 100 && ctlResize?.rows === 30, 10000);
+  } catch (e) {
+    log(`WARN: ${e.message}`);
+  }
+  await sleep(2500); // let the resize re-layout settle before typing (input-race fix)
 
   const readyMs = await sendPrompt(
     "SPIKE1-READY",
     "Reply with exactly this single token and nothing else: SPIKE1-READY",
   );
-  record("A1", "browser keystrokes reach pi; assistant reply renders in terminal", true,
-    `prompt->reply ${readyMs} ms; connect->first byte ${connectToFirstByteMs} ms`);
-  record("A2", "resize propagated; rendering survives resize", true,
-    "resize 100x30 sent mid-session; subsequent prompts still round-trip (see B/C/D timings)");
+  // A1 claim kept honest: this driver has NO browser — it proves the WS-level
+  // roundtrip (keystrokes echoed into the PTY stream and verified before
+  // Enter, plus the authoritative session-tail reply event). The PTY-text
+  // check below is deliberately weak (first word of the reply searched
+  // anywhere in the accumulated stream, the echoed prompt included) and is
+  // reported as supplementary evidence, never as the pass condition.
+  const a1FirstWord = lastReply.preview.slice(0, 20).trim().split(/\s+/)[0] ?? "###";
+  const a1PtyTextWeak = lastReply.preview.length > 0 && tuiText().includes(a1FirstWord);
+  record("A1", "keystrokes over WS reach pi; assistant reply observed via session-tail (turn-final message_end)", lastReply.markerSeen,
+    `submit->reply ${lastReply.replyMs} ms; typing->reply ${readyMs} ms; driver-start->record ${Date.now() - t0} ms; connect->first byte ${connectToFirstByteMs} ms; reply preview: ${JSON.stringify(lastReply.preview.slice(0, 100))}; marker in final reply: ${lastReply.markerSeen}; weak PTY-text check (first word anywhere in stream, echoed prompt included — not proof of rendering): ${a1PtyTextWeak}`);
+  // A2 is NOT recorded here: the claim ("resize accepted by the PTY [ctl:ok];
+  // session survived") is proven by the ctl ack asserted above plus the
+  // marker-confirmed exchanges that complete AFTER the resize — see the A2
+  // record following D1 below.
 
   // ---------- B: session observation ----------
   const bMs = await sendPrompt(
@@ -169,6 +281,7 @@ async function main() {
     `start=${events.filter((e) => e.event?.type === "tool_execution_start").length} end=${events.filter((e) => e.event?.type === "tool_execution_end").length}`);
   record("B3", "PI_SESSION_FILE/PI_SESSION_ID read from spawned process env", sessionFileEchoed,
     `bash tool child env echoed PI_SESSION_FILE pointing into .pi-run/sessions; step ${bMs} ms`);
+  confirmExchange("B4", "PIENV-DONE", bMs);
 
   // ---------- C: MCP tool seam ----------
   const cMs = await sendPrompt(
@@ -183,6 +296,7 @@ async function main() {
     : "no spike1_ping tool events";
   record("C1", "pi called spike1_ping over MCP; result returned to agent", mcpOk,
     `${cDetail}; step ${cMs} ms`);
+  confirmExchange("C2", "MCP-DONE", cMs);
 
   // ---------- D: permission gate ----------
   const dMs = await sendPrompt(
@@ -196,6 +310,18 @@ async function main() {
   record("D1", "bash command containing spike1-deny-me blocked with visible reason", !!denyEv,
     denyEv ? `blocked toolResult preview: ${JSON.stringify(String(denyEv.event.preview).slice(0, 160))}; step ${dMs} ms`
            : `no blocked toolResult event; step ${dMs} ms`);
+  confirmExchange("D2", "GATE-DONE", dMs);
+
+  // A2, recorded here rather than at resize time: the ctl ack asserted right
+  // after the resize proves the PTY itself accepted it (result of
+  // pty_master.resize(), reported by the host as {"t":"ctl"}); reaching this
+  // line with >=3 marker-confirmed exchanges proves the session survived it.
+  // No browser is involved in this driver, so no claim about browser
+  // rendering is made (manual observation only — see README).
+  const ctlOk = ctlResize?.ok === true && ctlResize?.cols === 100 && ctlResize?.rows === 30;
+  record("A2", "resize sent over WS and accepted by the PTY (host ctl:ok from pty_master.resize()); session survived (marker-confirmed post-resize exchanges)",
+    ctlOk && postResizeExchanges.length >= 3,
+    `resize 100x30 sent mid-session (+3.0 s after first byte); host ctl ack: ${ctlResize ? `cols=${ctlResize.cols} rows=${ctlResize.rows} ok=${ctlResize.ok}${ctlResize.err ? ` err=${String(ctlResize.err)}` : ""}` : "NOT RECEIVED"}; marker-confirmed post-resize exchanges: ${postResizeExchanges.length ? postResizeExchanges.join(", ") : "none"} (exchanges with a missing marker are recorded as FAIL and excluded; E is best-effort and has its own driver)`);
 
   // ---------- E: visual path ----------
   const eMs = await sendPrompt(
@@ -234,6 +360,7 @@ async function main() {
 
 main().catch((e) => {
   log(`FATAL: ${e.message}`);
+  log(`STACK: ${e.stack ?? ""}`);
   try {
     writeFileSync(join(runDir, "e2e-result.json"), JSON.stringify({ startedAt: new Date(t0).toISOString(), wsPort, results, fatal: String(e), totalMs: Date.now() - t0 }, null, 2));
     writeFileSync(join(runDir, "e2e-tui-output.bin"), Buffer.concat(tuiChunks));
