@@ -77,6 +77,7 @@ Warstwa UI profili webowych: TypeScript + React + dockview (+ CodeMirror 6 w try
 - **Ewaluacja przed budową**: zestaw zadań wzorcowych na własnym repo + metryka skuteczności (nie metryki pośrednie); każda decyzja narzędziowa porównywana z sensownym baseline'em.
 - **TDD domyślnie**: rdzeń niezależny od UI jest projektowany pod testy; zmiana zachowania bez testu nie trafia do main.
 - **Pionowy plaster przed rozszerzaniem**: end-to-end zanim poziomo.
+- **Plaster = commit** (operator, 2026-10-11): pracę dzielimy na małe, testowalne fragmenty — jeden cel, jeden szew; każdy domknięty plaster ląduje jako osobny, opisowo nazwany commit (co + dlaczego). Commity są jednostką nawigacji historii: szukamy „kiedy i dlaczego" przez git log/blame, nie przez zgadywanie.
 - **Recenzje z fresh-context**: autor nie jest jedynym recenzentem własnej pracy.
 
 ## 5. Decyzje zamknięte (zmiana = świadomy pivot, zapisany tutaj)
