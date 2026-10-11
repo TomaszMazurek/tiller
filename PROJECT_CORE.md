@@ -43,7 +43,7 @@ crates/
   - **MCP**: rdzeń jest **serwerem narzędzi** (index, lsp, term), agent klientem;
   - **ACP**: kokpit jest **klientem prezentacji** agenta, agent obsługuje protokół;
   - **natywny protokół agenta**: gdy agent ma własny protokół hostowania (np. tryb RPC Pi) — adapter per agent;
-  - **PTY**: surowe wejście/wyjście bez strukturalnego sterowania i zatwierdzeń (terminal użytkownika, agenty TUI-only).
+  - **PTY**: hosting agenta jako TUI w terminalu (główna powierzchnia interakcji z agentem) oraz terminal użytkownika; surowe I/O bez strukturalnego sterowania.
 
 ### Zasady architektoniczne
 

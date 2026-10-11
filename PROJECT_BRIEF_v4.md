@@ -10,7 +10,7 @@ v4 nie unieważnia v3 — zachowuje bazowy stack i zasadę separacji rdzeń/UI, 
 
 IDE dla **agent-only coding**: kod piszą agenty AI, człowiek steruje, przegląda i zatwierdza. Produkt pełni dwie role naraz:
 
-1. **Kokpit nadzoru** — misja-control: zadania, statusy agentów, transkrypcje, diffy, zatwierdzenia, rollback.
+1. **Kokpit nadzoru** — misja-control: zadania, statusy agentów (pochodne z obserwacji sesji i gita), diffy, zatwierdzenia, rollback; **rozmowa z agentem żyje w terminalu**.
 2. **Dostawca zmysłów i rąk** — rdzeń IDE wystawia agentom narzędzia, których samemu agentowi brakuje: indeks symboli, diagnostyki LSP, semantyczny diff, kontrolowane wykonywanie komend.
 
 **Kluczowa obserwacja architektoniczna:** agent jest **drugim klientem rdzenia, równorzędnym z frontendem**. Rdzeń headless z wąskim protokołem i wymiennym transportem (v3) obsługuje to natywnie: do człowieka mówi kokpit (React UI przez JSON-RPC), do agenta mówi MCP (narzędzia) i ACP (prezentacja i sterowanie).
@@ -38,7 +38,8 @@ IDE dla **agent-only coding**: kod piszą agenty AI, człowiek steruje, przeglą
 |---|---|
 | Język rdzenia | **Rust** |
 | Shell aplikacji | **Tauri 2** |
-| UI | **React + dockview** — kokpit (timeline, diffy, zatwierdzenia), nie edytor |
+| UI | **React + dockview** — kokpit (terminal, diffy, review), nie edytor |
+| Interakcja z agentem | **Terminal** — cała praca z agentem w oknie terminala; zero dedykowanych okien czatu/timeline; **wyjątek: okno wklejania zrzutów/obrazów** |
 | Przeglądanie kodu | **CodeMirror 6 read-only** (tryb review) + podświetlanie **Lezer/Shiki**; bez własnego mostu do tree-sitter |
 | Diff | **Semantyczny w stylu difftastic** (tree-sitter, Rust) obok liniowego |
 | Agenty | **Hostowane zewnętrznie**; **Pi jako nr 1** (dogfooding); adaptery przez **ACP/MCP/proces+PTY** |
@@ -93,9 +94,9 @@ crates/
 
 ### Frontend (TypeScript)
 
-- **React + dockview**: kokpit - lewa: drzewo plików ze statusami (zmienione / w edycji / błąd weryfikacji); centrum: Diff Inspector (liniowy + semantyczny) i podgląd read-only; prawa: timeline agenta (komunikaty i zdarzenia udostępniane przez adapter - nie wewnętrzne rozumowanie modelu - wywołania narzędzi, koszyk tokenów, „Approve & Merge" / „Rollback"); dół: bramki (`cargo check`/`test`) i terminal
+- **React + dockview**: kokpit — **praca z agentem odbywa się wyłącznie w terminalu**; pozostałe panele to powierzchnie przeglądu, nie rozmowy: drzewo plików ze statusami (zmienione / w edycji / błąd weryfikacji), Diff Inspector (liniowy + semantyczny) i podgląd read-only w centrum, kolejka review z „Approve & Merge" / „Rollback", bramki (`cargo check`/`test`) na dole. Status pracy agenta jest pochodny: tail pliku sesji (JSONL) + stan worktree/gita — nie okno czatu. **Jedyny wyjątek:** okno wklejania zrzutów i obrazów (terminal nie przyjmuje multimediów) — zapis do katalogu spool, rozszerzenie Pi po stronie agenta wstrzykuje materiał do rozmowy (mechanizm do potwierdzenia w Etapie 2)
 - **CodeMirror 6** (tryb review) z podświetlaniem **Lezer/Shiki** + nawigacją LSP (go-to-def, references w diffie)
-- **xterm.js**: podgląd terminala bramek i procesów agentów
+- **xterm.js**: **terminal — główne okno pracy z agentem** (hosting TUI agenta przez PTY) oraz podgląd bramek/procesów
 
 ## 5. Architektura
 
@@ -115,7 +116,7 @@ crates/
 
 **Zasady:**
 1. Rdzeń w osobnych crate'ach, niezależnych od Tauri (dziedziczone z v3).
-2. **Agent = drugi klient rdzenia, równorzędny z UI**; ten sam rdzeń, dwie twarze.
+2. **Agent = drugi klient rdzenia, równorzędny z UI**; ten sam rdzeń, dwie twarze. **Terminal-first: praca z agentem odbywa się w terminalu** — interaktywny agent działa jako TUI w panelu terminala (PTY) i tam jest sterowany; kokpit nie renderuje własnego czatu ani timeline agenta — strukturę pracy czerpie z obserwacji (plik sesji JSONL, worktree/git). Tryb RPC agenta służy zadaniom inicjowanym przez IDE w tle, nie zastępuje terminala.
 3. UI rozmawia własnym wąskim protokołem JSON-RPC; agenty — przez MCP/ACP; wspólny mianownik: **trait narzędzi w `core`**.
 4. **Transakcje pracy:** zadanie → `orch` przydziela worktree → agent pracuje swobodnie (czyta przez narzędzia, pisze pliki, uruchamia weryfikację) → checkpointy jako commity → **niezmienny kandydat review** (id zmiany + commit bazowy) z diffem, transkryptem i wynikami bramek → człowiek approve/merge albo request changes. Zmiana kandydata **unieważnia zgodę**; merge sprawdza się względem **aktualnej bazy** (rebase + weryfikacja). Rollback = zatrzymanie pisarza, potem reset worktree wraz z plikami nieśledzonymi; skutki komend poza repo są poza gwarancją rollbacku (ale w audycie).
 5. **Dwa wątki weryfikacji:** verify loop (cargo check/test, autorytatywny, w worktree) i fast loop (diagnostyki LSP, best-effort — docelowo narzędzie MCP).
@@ -144,7 +145,7 @@ crates/
 **Etap 0: walidacja (spike'i, 2–3 tygodnie)**
 - **Spike 0 — ewaluacja:** zadania wzorcowe + metryka + baseline.
 - **Spike 1 — adapter Pi (warunek MVP, najwyższy priorytet):** uruchomienie zadania, zdarzenia strukturalne (komunikaty, wywołania narzędzi), anulowanie/steering, zatwierdzenia, zakończenie. Rozstrzyga hipotezę ACP/MCP/PTY i dokumentuje, co Pi faktycznie udostępnia.
-  - **Rekonesans (2026-10-11) — rozstrzygnięty:** wszystkie zdolności AVAILABLE poza ACP (ABSENT w Pi) i approvals (PARTIAL → w pełni implementowalne przez rozszerzenie permission-gate + podprotokół `extension_ui_request/response`). Werdykt szwów: Pi = natywny RPC (bez PTY), przyszłe agenty = ACP-klient, narzędzia = rmcp. Ryzyko nr 1 przeniesione na Windows: zarządzanie drzewem procesów (Job Objects) + cancel na poziomie protokołu. Pozostała część praktyczna: minimalny host w Rust (spawn `pi --mode rpc`, pełna runda prompt/steer/abort + zdalne zatwierdzenie) — to zadanie kodowe dla workera.
+  - **Rekonesans (2026-10-11) - rozstrzygnięty:** wszystkie zdolności AVAILABLE poza ACP (ABSENT w Pi) i approvals (PARTIAL → w pełni implementowalne przez rozszerzenie permission-gate + podprotokół `extension_ui_request/response`). Werdykt szwów: interaktywny Pi = **TUI w terminalu (PTY)** zgodnie z zasadą terminal-first (decyzja operatora, 2026-10-11); tryb RPC = zwalidowany, zarezerwowany dla zadań tła; przyszłe agenty = ACP-klient; narzędzia = rmcp. Ryzyko nr 1 na Windows: PTY/ConPTY dla TUI agenta + zarządzanie drzewem procesów (Job Objects). Pozostała część praktyczna (zadanie kodowe dla workera): hosting `pi` TUI w PTY (ConPTY) z pełną interakcją w terminalu, obserwacja sesji JSONL, mini-serwer MCP (rmcp, stdio) oraz weryfikacja, że rozszerzenie permission-gate egzekwuje polityki w sesji TUI.
 - **Spike 2 — transakcje i integralność review:** worktree per zadanie, checkpointy jako commity, kandydat review (id + baza), unieważnienie zgody przy zmianie kandydata, merge względem aktualnej bazy, rollback ze zatrzymaniem pisarza i plikami nieśledzonymi.
 - **Spike 3 — pętla naprawcza:** agent edytuje w worktree, `cargo check`/`test` jako bramka; realne czasy i częstotliwość wywołań.
 - **Spike 4 — kontekst:** skeleton AST vs wyszukiwanie na żądanie, mierzone na zadaniach ze Spike'a 0.
@@ -156,7 +157,7 @@ Równoległość agentów celowo **nie** jest walidowana w Etapie 0 — dopiero 
 - Tauri 2 + React + dockview: layout kokpitu, streaming JSON-RPC, timeline agenta, panel sterowania.
 
 **Etap 2: ręce (minimalny zestaw dla plastra)**
-- Adapter Pi przez natywny tryb RPC (pipes — bez PTY); minimalny serwer MCP na `rmcp`: odczyt plików, proste szukanie, `term` z polityką; worktree/checkpointy w `orch`/`git`. Indeks i LSP jako narzędzia MCP celowo dopiero w Etapie 4 — plaster ma być cienki.
+- Hosting Pi w terminalu (PTY + xterm.js, TUI agenta; steering i zatwierdzenia w terminalu, rozszerzenie permission-gate zarządzane przez IDE); minimalny serwer MCP na `rmcp`: odczyt plików, proste szukanie, `term` z polityką; worktree/checkpointy w `orch`/`git`; obserwacja pracy: tail sesji JSONL. Tryb RPC (pipes) dopiero dla zadań tło w późniejszym etapie. Indeks i LSP jako narzędzia MCP celowo dopiero w Etapie 4 — plaster ma być cienki.
 
 **Etap 3: pionowy plaster end-to-end (MVP)**
 - Zadanie → agent w worktree → diff + transkrypt + bramki → approve/merge albo rollback. Działa na zadaniach ze Spike'a 0.
