@@ -39,10 +39,11 @@ crates/
 ### Dwaj klienci rdzenia (równorzędni)
 
 - **Kokpit/UI** — własny, wąski protokół JSON-RPC; transport wymienny (Tauri IPC ↔ WebSocket).
-- **Agent** — trzy nierównoważne szwy o różnych rolach:
+- **Agent** — cztery nierównoważne szwy o różnych rolach:
   - **MCP**: rdzeń jest **serwerem narzędzi** (index, lsp, term), agent klientem;
   - **ACP**: kokpit jest **klientem prezentacji** agenta, agent obsługuje protokół;
-  - **PTY**: surowe wejście/wyjście bez strukturalnego sterowania i zatwierdzeń.
+  - **natywny protokół agenta**: gdy agent ma własny protokół hostowania (np. tryb RPC Pi) — adapter per agent;
+  - **PTY**: surowe wejście/wyjście bez strukturalnego sterowania i zatwierdzeń (terminal użytkownika, agenty TUI-only).
 
 ### Zasady architektoniczne
 
@@ -66,6 +67,7 @@ crates/
 | Obserwowanie plików | `notify` |
 | Szukanie, indeks symboli | `ignore` + `tantivy` + `rusqlite` |
 | CPU | `rayon` |
+| Serwer narzędzi MCP | `rmcp` (oficjalne SDK; stdio + Streamable HTTP, bez WebSocket) |
 
 Warstwa UI profili webowych: TypeScript + React + dockview (+ CodeMirror 6 w trybie read-only, xterm.js, podświetlanie Lezer/Shiki). Shell: Tauri 2.
 

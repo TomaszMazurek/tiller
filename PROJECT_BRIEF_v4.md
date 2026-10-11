@@ -55,7 +55,7 @@ IDE dla **agent-only coding**: kod piszą agenty AI, człowiek steruje, przeglą
 
 - **Hostowanie zamiast własnego silnika:** silnik agentowy (zarządzanie kontekstem, kompakcja, retry, steering w locie, uprawnienia) to najtrudniejsza i najszybciej starzejąca się warstwa; Devin i OpenHands poświęcili jej lata pracy dużych zespołów. Mamy działający harness, którego używamy codziennie — pionowy plaster „Pi + worktree + diff + approve" daje pierwszą wartość w tygodnie. Trait narzędzi w rdzeniu pozostawia szew pod własny silnik bez przepisywania.
 - **Worktree zamiast bufora w pamięci jako ground truth:** kompilator i testy pracują na plikach; pełne błędy daje rustc, nie rust-analyzer. Agent pisze więc swobodnie **w swoim worktree**, a bramka jest na merge — nie na każdą edycję (bramkowanie per edycja zabija zmiany wieloetapowe). Overlay LSP (`didChange` bez zapisu) zostaje jako tani fast-loop, nie jako mechanizm transakcyjny.
-- **ACP + MCP zamiast własnego protokołu adaptera — hipoteza do walidacji (Spike 1):** role są różne, nie zamienne — **MCP**: rdzeń jest serwerem narzędzi, agent klientem; **ACP**: kokpit jest klientem, agent obsługuje protokół prezentacji; **PTY**: surowe wejście/wyjście bez strukturalnego sterowania i zatwierdzeń. „Dwa standardy zamiast N własnych protokołów" pozostaje hipotezą, dopóki adapter Pi nie pokaże, co faktycznie udostępnia.
+- **ACP + MCP zamiast własnego protokołu adaptera — rozstrzygnięte rekonesansem (Spike 1, 2026-10-11):** role są różne, nie zamienne — **MCP**: rdzeń jest serwerem narzędzi, agent klientem; **ACP**: kokpit jest klientem, agent obsługuje protokół prezentacji; **PTY**: surowe wejście/wyjście bez strukturalnego sterowania. Werdykt rekonesansu: **Pi udostępnia natywny tryb RPC** (`--mode rpc`: dwukierunkowy JSONL — prompt/steer/follow_up/abort, zdarzenia strukturalne, statystyki sesji, oraz podprotokół `extension_ui_request/response` dający programowe bramkowanie zatwierdzeń z hosta) i **nie implementuje ACP** — więc adapter Pi używa natywnego RPC (pipes, bez PTY); **ACP (kokpit jako klient, oficjalny crate `agent-client-protocol`, pin v1) wchodzi dopiero z agentami niebędącymi Pi**; serwer MCP na oficjalnym **`rmcp`** (stdio + Streamable HTTP; WebSocket wyłączony w SDK — nie projektować pod WS). Szczegóły: `research/spike1-*.md`.
 - **Semantyczny diff:** difftastic jest w Ruście i oparty o tree-sitter — możliwy do osadzenia lub wzorowania; realna przewaga review-UI nad diffem liniowym dla zmian refaktoryzacyjnych.
 - **Ewaluacja przed budową:** bez wzorcowych zadań i metryki skuteczności łatwo optymalizować metryki pośrednie (tokeny) zamiast rezultatów.
 
@@ -144,6 +144,7 @@ crates/
 **Etap 0: walidacja (spike'i, 2–3 tygodnie)**
 - **Spike 0 — ewaluacja:** zadania wzorcowe + metryka + baseline.
 - **Spike 1 — adapter Pi (warunek MVP, najwyższy priorytet):** uruchomienie zadania, zdarzenia strukturalne (komunikaty, wywołania narzędzi), anulowanie/steering, zatwierdzenia, zakończenie. Rozstrzyga hipotezę ACP/MCP/PTY i dokumentuje, co Pi faktycznie udostępnia.
+  - **Rekonesans (2026-10-11) — rozstrzygnięty:** wszystkie zdolności AVAILABLE poza ACP (ABSENT w Pi) i approvals (PARTIAL → w pełni implementowalne przez rozszerzenie permission-gate + podprotokół `extension_ui_request/response`). Werdykt szwów: Pi = natywny RPC (bez PTY), przyszłe agenty = ACP-klient, narzędzia = rmcp. Ryzyko nr 1 przeniesione na Windows: zarządzanie drzewem procesów (Job Objects) + cancel na poziomie protokołu. Pozostała część praktyczna: minimalny host w Rust (spawn `pi --mode rpc`, pełna runda prompt/steer/abort + zdalne zatwierdzenie) — to zadanie kodowe dla workera.
 - **Spike 2 — transakcje i integralność review:** worktree per zadanie, checkpointy jako commity, kandydat review (id + baza), unieważnienie zgody przy zmianie kandydata, merge względem aktualnej bazy, rollback ze zatrzymaniem pisarza i plikami nieśledzonymi.
 - **Spike 3 — pętla naprawcza:** agent edytuje w worktree, `cargo check`/`test` jako bramka; realne czasy i częstotliwość wywołań.
 - **Spike 4 — kontekst:** skeleton AST vs wyszukiwanie na żądanie, mierzone na zadaniach ze Spike'a 0.
@@ -155,7 +156,7 @@ Równoległość agentów celowo **nie** jest walidowana w Etapie 0 — dopiero 
 - Tauri 2 + React + dockview: layout kokpitu, streaming JSON-RPC, timeline agenta, panel sterowania.
 
 **Etap 2: ręce (minimalny zestaw dla plastra)**
-- Adapter Pi wg wyników Spike'a 1; minimalny serwer MCP: odczyt plików, proste szukanie, `term` z polityką; worktree/checkpointy w `orch`/`git`. Indeks i LSP jako narzędzia MCP celowo dopiero w Etapie 4 — plaster ma być cienki.
+- Adapter Pi przez natywny tryb RPC (pipes — bez PTY); minimalny serwer MCP na `rmcp`: odczyt plików, proste szukanie, `term` z polityką; worktree/checkpointy w `orch`/`git`. Indeks i LSP jako narzędzia MCP celowo dopiero w Etapie 4 — plaster ma być cienki.
 
 **Etap 3: pionowy plaster end-to-end (MVP)**
 - Zadanie → agent w worktree → diff + transkrypt + bramki → approve/merge albo rollback. Działa na zadaniach ze Spike'a 0.
