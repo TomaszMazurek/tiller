@@ -185,6 +185,7 @@ Równoległość agentów celowo **nie** jest walidowana w Etapie 0 — dopiero 
 | **OpenHands, Devin** | Kontrast: pełne własne silniki — mapa kosztów drogi, której unikamy |
 | **Aider, Goose** | Wzorce harnessów agentowych i ewaluacji |
 | **Lapce, Helix** | Wzorce techniczne rdzenia (LSP, tree-sitter) — dziedziczone z v3 |
+| **RE:Dox (CAPCOM, .NET)** | Wzorce do „ukradzenia" — NIE jako zależność (zły runtime, brak potrzeby): token DOM/IR — jedna reprezentacja dla parsowania/edycji/konwersji formatów (kandydat przy projektowaniu `index/` i diffu, Etap 4); trivia-preserving editing — komentarze/whitespace przeżywają edycję i re-serializację (edycja configów JSON5/TOML, profil Classic); asymetryczny read/write |
 
 ## 9. Do ustalenia
 
