@@ -1,0 +1,19 @@
+[package]
+name = "tiller-term"
+description = "Tiller terminal seam: production PTY sessions with a DSR responder, serialized input/resize, and the command policy/audit hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tiller-core.workspace = true
+portable-pty.workspace = true
+serde.workspace = true
+
+# SIGKILL escalation for kill()/drop on Unix; Windows stays on
+# TerminateProcess (best-effort, reaper-authoritative).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
