@@ -1,4 +1,4 @@
-# MyIDE — dokument rdzeniowy (core)
+# Tiller — dokument rdzeniowy (core)
 
 > Jedno źródło prawdy dla fundamentu projektu. Profile produktowe (forki) odnoszą się do tego dokumentu i dodają wyłącznie warstwę produktową: UI, kolejność etapów, eksponowane narzędzia.
 >
@@ -102,6 +102,7 @@ Warstwa UI profili webowych: TypeScript + React + dockview (+ CodeMirror 6 w try
 | v4 | pivot agent-only po 3 opiniach zewnętrznych: kokpit + narzędzia dla agentów, MCP/ACP, transakcje, bezpieczeństwo procesowe, ewaluacja |
 | v4+review | pętla: oracle (Astra) → 5 znalezisk → remediacja → rewalidacja (Sol) → DOMKNIĘTE Z UWAGAMI → poprawki spójności |
 | **core 1.0** | wyodrębnienie fundamentu wspólnego z v3+v4 jako baza dla forków |
+| **Tiller** | właściwa nazwa projektu (2026-10-11; wcześniej tymczasowe MyIDE). Tiller = ster łodzi |
 
 ## 7. Spis dokumentów
 
@@ -115,7 +116,6 @@ Iteracje v1–v2 zostały wchłonięte przez §6 i usunięte z katalogu roboczeg
 
 ## 8. Otwarte kwestie globalne
 
-- Nazwa projektu (MyIDE tymczasowa).
 - Poziom autonomii agentów: bramki vs review po fakcie (profil agent).
 - Sandbox na Windows: WSL2 vs ograniczenia procesu (Spike 5 profilu agent).
 - Moment włączenia C++ (clangd) i dodatkowych adapterów agentów.

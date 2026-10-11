@@ -185,7 +185,6 @@ Każdy spike to samodzielny mini-projekt z wnioskiem: „nadaje się / pułapki 
 
 - Szczegóły współdzielenia gramatyk tree-sitter między UI a rdzeniem (wersje gramatyk, wspólne pliki query) — rozstrzyga Etap 0/2.
 - Moment włączenia C++ (clangd) — po ustabilizowaniu dogfoodingu na Ruście.
-- Nazwa projektu (MyIDE jest tymczasowa).
 
 ## 10. Alternatywy rozważone i odrzucone (na teraz)
 

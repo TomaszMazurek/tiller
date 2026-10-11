@@ -1,4 +1,4 @@
-# MyIDE — Agent Edition: brief projektu i stack (v4)
+# Tiller — Agent Edition: brief projektu i stack (v4)
 
 > Fork produktowy profilu **Agent Edition** (aktywny). Fundament wspólny, zasady pracy i decyzje zamknięte: **`PROJECT_CORE.md`**.
 
@@ -188,7 +188,6 @@ Równoległość agentów celowo **nie** jest walidowana w Etapie 0 — dopiero 
 - Poziom autonomii: bramki na każdej akcji poza allowlistą (rekomendacja) vs pełne auto z review po fakcie.
 - Sandbox Windows: WSL2 vs ograniczenia procesu — rozstrzyga Spike 5.
 - Moment włączenia C++ (clangd) i dodatkowych adapterów (claude-code, codex).
-- Nazwa projektu (MyIDE tymczasowa).
 
 ## 10. Alternatywy rozważone i odrzucone
 
