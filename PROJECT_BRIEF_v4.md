@@ -39,10 +39,10 @@ IDE dla **agent-only coding**: kod piszą agenty AI, człowiek steruje, przeglą
 | Język rdzenia | **Rust** |
 | Shell aplikacji | **Tauri 2** |
 | UI | **React + dockview** — kokpit (terminal, diffy, review), nie edytor |
-| Interakcja z agentem | **Terminal** — cała praca z agentem w oknie terminala; zero dedykowanych okien czatu/timeline; **wyjątek: okno wklejania zrzutów/obrazów** |
+| Interakcja z agentem | **Terminal** — cała praca z agentem w oknie terminala; zero dedykowanych okien czatu/timeline; **wyjątek: okno komunikacji wizualnej** (wklejanie zrzutów/obrazów + szkicownik) |
 | Przeglądanie kodu | **CodeMirror 6 read-only** (tryb review) + podświetlanie **Lezer/Shiki**; bez własnego mostu do tree-sitter |
 | Diff | **Semantyczny w stylu difftastic** (tree-sitter, Rust) obok liniowego |
-| Agenty | **Hostowane zewnętrznie**; **Pi jako nr 1** (dogfooding); adaptery przez **ACP/MCP/proces+PTY** |
+| Agenty | **Hostowane zewnętrznie w terminalu**: **Pi (nr 1)**, **AGY**, **Codex**, **Claude Code** (przyszłość); obserwacja sesji i wstrzykiwanie przez adaptery per agent |
 | Własny silnik agenta | **Odroczony** — szew: trait narzędzi w rdzeniu; wraca tylko, jeśli adaptery przestaną wystarczać |
 | Inteligencja języka | **LSP read-only** (diagnostyki, go-to-def, references w review) + **tree-sitter w rdzeniu** (indeks, kompresja kontekstu, diff) |
 | Weryfikacja | **Verify loop**: `cargo check`/`test` w worktree (autorytatywna); **fast loop**: diagnostyki LSP (best-effort, przyszłe narzędzie MCP) |
@@ -85,7 +85,7 @@ crates/
 ├─ git/      # worktree management, checkpointy, timeline, semantyczny diff
 ├─ term/     # PTY + model uprawnień (allowlista/potwierdzenie/zakaz) + sandbox
 ├─ orch/     # kolejka zadań, alokacja worktree, kolejka review, merge
-├─ agents/   # adaptery: Pi (proces+PTY/ACP), przyszłe (claude-code, codex)
+├─ agents/   # adaptery per agent: Pi, AGY, Codex, Claude Code — hosting TUI, obserwacja sesji, wstrzykiwanie wizualne
 ├─ rpc/      # JSON-RPC dla kokpitu + serwer MCP + klient ACP
 ├─ dap/      # klient DAP (późny etap)
 ├─ agent-daemon/  # tryb headless (WebSocket), dziedziczony z v3
@@ -94,10 +94,11 @@ crates/
 
 ### Frontend (TypeScript)
 
-- **React + dockview**: kokpit — **praca z agentem odbywa się wyłącznie w terminalu**; pozostałe panele to powierzchnie przeglądu, nie rozmowy: drzewo plików ze statusami (zmienione / w edycji / błąd weryfikacji), Diff Inspector (liniowy + semantyczny) i podgląd read-only w centrum, kolejka review z „Approve & Merge" / „Rollback", bramki (`cargo check`/`test`) na dole. Status pracy agenta jest pochodny: tail pliku sesji (JSONL) + stan worktree/gita — nie okno czatu. **Jedyny wyjątek:** okno wklejania zrzutów i obrazów (terminal nie przyjmuje multimediów) — zapis do katalogu spool, rozszerzenie Pi po stronie agenta wstrzykuje materiał do rozmowy (mechanizm do potwierdzenia w Etapie 2)
+- **React + dockview**: kokpit — **praca z agentem odbywa się wyłącznie w terminalu**; pozostałe panele to powierzchnie przeglądu, nie rozmowy: drzewo plików ze statusami (zmienione / w edycji / błąd weryfikacji), Diff Inspector (liniowy + semantyczny) i podgląd read-only w centrum, kolejka review z „Approve & Merge" / „Rollback", bramki (`cargo check`/`test`) na dole. Status pracy agenta jest pochodny: tail pliku sesji (JSONL) + stan worktree/gita — nie okno czatu. **Jedyny wyjątek: okno komunikacji wizualnej** — terminal nie przyjmuje multimediów (szczegóły niżej).
 - **CodeMirror 6** (tryb review) z podświetlaniem **Lezer/Shiki** + nawigacją LSP (go-to-def, references w diffie)
 - **xterm.js**: **terminal — główne okno pracy z agentem** (hosting TUI agenta przez PTY) oraz podgląd bramek/procesów
 - **Narzędzia prezentacji przez MCP** (propozycja, do walidacji w Etapie 2): agent otwiera widoki kokpitu — `ide_show_diff`, `ide_open_file` — wołając narzędzia IDE; bogata integracja bez okna czatu, a wywołania lądują w sesji JSONL (struktura zachowana)
+- **Okno komunikacji wizualnej** — jedyne „mówienie" do agenta poza terminalem: (a) wklejanie/drop zrzutów i obrazów, (b) **szkicownik** na osadzonym **Excalidraw** (MIT, gotowy komponent React) — schematy, diagramy, wizualizacje koncepcji. Przepływ: eksport **PNG + SVG** → katalog spool per sesja → wstrzyknięcie do rozmowy przez adapter agenta. **SVG jest tekstem** — czyta go każdy agent nawet bez modelu wizyjnego; PNG wymaga modelu z vision (zależne od providera). Możliwości dziś: `read` w Pi przyjmuje obrazy jako załączniki, Codex i Claude Code obsługują obrazy natywnie; AGY — do zweryfikowania (spike)
 
 ## 5. Architektura
 
@@ -146,7 +147,7 @@ crates/
 **Etap 0: walidacja (spike'i, 2–3 tygodnie)**
 - **Spike 0 — ewaluacja:** zadania wzorcowe + metryka + baseline.
 - **Spike 1 — adapter Pi (warunek MVP, najwyższy priorytet):** uruchomienie zadania, zdarzenia strukturalne (komunikaty, wywołania narzędzi), anulowanie/steering, zatwierdzenia, zakończenie. Rozstrzyga hipotezę ACP/MCP/PTY i dokumentuje, co Pi faktycznie udostępnia.
-  - **Rekonesans (2026-10-11) - rozstrzygnięty:** wszystkie zdolności AVAILABLE poza ACP (ABSENT w Pi) i approvals (PARTIAL → w pełni implementowalne przez rozszerzenie permission-gate + podprotokół `extension_ui_request/response`). Werdykt szwów: interaktywny Pi = **TUI w terminalu (PTY)** zgodnie z zasadą terminal-first (decyzja operatora, 2026-10-11); tryb RPC = zwalidowany, zarezerwowany dla zadań tła; przyszłe agenty = ACP-klient; narzędzia = rmcp. Ryzyko nr 1 na Windows: PTY/ConPTY dla TUI agenta + zarządzanie drzewem procesów (Job Objects). Pozostała część praktyczna (zadanie kodowe dla workera): hosting `pi` TUI w PTY (ConPTY) z pełną interakcją w terminalu, obserwacja sesji JSONL, mini-serwer MCP (rmcp, stdio) oraz weryfikacja, że rozszerzenie permission-gate egzekwuje polityki w sesji TUI; plus wstępna weryfikacja mostu obrazów (czy sesja Pi przyjmuje załączniki graficzne, wstrzyknięcie przez rozszerzenie do aktywnej rozmowy). Plan awaryjny gdyby ConTTY okazał się niewiarygodny: zewnętrzny terminal systemowy + IDE w roli obserwera (sesja JSONL + git).
+  - **Rekonesans (2026-10-11) - rozstrzygnięty:** wszystkie zdolności AVAILABLE poza ACP (ABSENT w Pi) i approvals (PARTIAL → w pełni implementowalne przez rozszerzenie permission-gate + podprotokół `extension_ui_request/response`). Werdykt szwów: interaktywny Pi = **TUI w terminalu (PTY)** zgodnie z zasadą terminal-first (decyzja operatora, 2026-10-11); tryb RPC = zwalidowany, zarezerwowany dla zadań tła; przyszłe agenty = ACP-klient; narzędzia = rmcp. Ryzyko nr 1 na Windows: PTY/ConPTY dla TUI agenta + zarządzanie drzewem procesów (Job Objects). Pozostała część praktyczna (zadanie kodowe dla workera): hosting `pi` TUI w PTY (ConPTY) z pełną interakcją w terminalu, obserwacja sesji JSONL, mini-serwer MCP (rmcp, stdio) oraz weryfikacja, że rozszerzenie permission-gate egzekwuje polityki w sesji TUI; plus weryfikacja kanału wizualnego jako macierzy per agent (Pi: `read` z załącznikami + wstrzyknięcie przez rozszerzenie; Codex: natywne wsparcie obrazów; Claude Code: odczyt obrazów; AGY: do ustalenia) i przepływu Excalidraw → PNG/SVG → spool → rozmowa. Plan awaryjny gdyby ConTTY okazał się niewiarygodny: zewnętrzny terminal systemowy + IDE w roli obserwera (sesja JSONL + git).
 - **Spike 2 — transakcje i integralność review:** worktree per zadanie, checkpointy jako commity, kandydat review (id + baza), unieważnienie zgody przy zmianie kandydata, merge względem aktualnej bazy, rollback ze zatrzymaniem pisarza i plikami nieśledzonymi.
 - **Spike 3 — pętla naprawcza:** agent edytuje w worktree, `cargo check`/`test` jako bramka; realne czasy i częstotliwość wywołań.
 - **Spike 4 — kontekst:** skeleton AST vs wyszukiwanie na żądanie, mierzone na zadaniach ze Spike'a 0.
