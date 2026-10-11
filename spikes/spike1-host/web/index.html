@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>spike1-host: pi in a PTY</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <style>
+    html, body { height: 100%; margin: 0; background: #1e1e1e; }
+    #bar {
+      font: 12px/1.6 Consolas, monospace; color: #9cdcfe;
+      background: #252526; padding: 4px 10px; display: flex; gap: 14px;
+    }
+    #bar .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #c50; margin-right: 4px; }
+    #bar.on .dot { background: #2c0; }
+    #term { height: calc(100% - 24px); padding: 4px; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="bar"><span><span class="dot"></span><span id="state">connecting…</span></span>
+    <span id="evcount">events: 0</span><span id="size"></span></div>
+  <div id="term"></div>
+
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script>
+    const stateEl = document.getElementById('state');
+    const evEl = document.getElementById('evcount');
+    const sizeEl = document.getElementById('size');
+    const bar = document.getElementById('bar');
+
+    const term = new Terminal({
+      fontFamily: 'Consolas, "Courier New", monospace',
+      fontSize: 14,
+      cursorBlink: true,
+      convertEol: false,
+      theme: { background: '#1e1e1e' },
+      allowProposedApi: true,
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('term'));
+    fit.fit();
+
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':8792';
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    let evCount = 0;
+    const sendResize = () => {
+      ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+      sizeEl.textContent = `pty ${term.cols}x${term.rows}`;
+    };
+
+    ws.onopen = () => {
+      bar.classList.add('on');
+      stateEl.textContent = 'connected ' + wsUrl;
+      ws.send(JSON.stringify({ t: 'hello', cols: term.cols, rows: term.rows }));
+      term.focus();
+    };
+    ws.onclose = () => { bar.classList.remove('on'); stateEl.textContent = 'disconnected'; };
+    ws.onerror = () => { stateEl.textContent = 'error'; };
+
+    // PTY output -> terminal
+    ws.onmessage = (msg) => {
+      if (typeof msg.data === 'string') {
+        // control channel: session-tail events and host notices
+        try {
+          const v = JSON.parse(msg.data);
+          if (v.t === 'ev') { evCount++; evEl.textContent = 'events: ' + evCount; }
+        } catch (_) { /* ignore */ }
+        return;
+      }
+      term.write(new Uint8Array(msg.data));
+    };
+
+    // terminal input -> PTY
+    term.onData((data) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(data));
+    });
+
+    // propagate resizes (browser window / devtools toggling)
+    window.addEventListener('resize', () => { fit.fit(); sendResize(); });
+    term.onResize(() => { if (ws.readyState === WebSocket.OPEN) sendResize(); });
+  </script>
+</body>
+</html>

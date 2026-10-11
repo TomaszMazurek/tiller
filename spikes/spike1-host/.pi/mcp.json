@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "spike1-tools": {
+      "args": [],
+      "command": "C:\\Repos\\MyIDE\\spikes\\spike1-host\\target\\debug\\spike1-mcp.exe",
+      "cwd": "C:\\Repos\\MyIDE\\spikes\\spike1-host",
+      "description": "Spike1 test tools: ping and spool listing",
+      "exposure": "direct"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="150" viewBox="0 0 420 150" font-family="Consolas, monospace">
+  <rect x="0" y="0" width="420" height="150" fill="#f7f7f7"/>
+  <rect x="15" y="40" width="110" height="50" rx="6" fill="#dfe8f5" stroke="#3a5a8c" stroke-width="2"/>
+  <text x="70" y="60" text-anchor="middle" font-size="13" fill="#1a2c47">BROWSER</text>
+  <text x="70" y="78" text-anchor="middle" font-size="11" fill="#3a5a8c">xterm.js</text>
+  <rect x="165" y="40" width="110" height="50" rx="6" fill="#e9f3e6" stroke="#3d7a34" stroke-width="2"/>
+  <text x="220" y="60" text-anchor="middle" font-size="13" fill="#1e3a1b">RUST HOST</text>
+  <text x="220" y="78" text-anchor="middle" font-size="11" fill="#3d7a34">WS + PTY</text>
+  <rect x="315" y="40" width="90" height="50" rx="6" fill="#f9ece8" stroke="#a0432c" stroke-width="2"/>
+  <text x="360" y="60" text-anchor="middle" font-size="13" fill="#5c2416">PI</text>
+  <text x="360" y="78" text-anchor="middle" font-size="11" fill="#a0432c">TUI</text>
+  <line x1="125" y1="65" x2="165" y2="65" stroke="#444" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="275" y1="65" x2="315" y2="65" stroke="#444" stroke-width="2" marker-end="url(#a)"/>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#444"/>
+    </marker>
+  </defs>
+  <text x="145" y="35" text-anchor="middle" font-size="10" fill="#666">bytes</text>
+  <text x="295" y="35" text-anchor="middle" font-size="10" fill="#666">ConPTY</text>
+  <text x="210" y="120" text-anchor="middle" font-size="12" fill="#333">SPIKE1: browser terminal hosts the pi agent</text>
+  <text x="210" y="136" text-anchor="middle" font-size="10" fill="#888">file: spool/spike1-diagram.svg</text>
+</svg>

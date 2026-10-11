@@ -1,0 +1,31 @@
+[package]
+name = "spike1-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "spike1_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spike1-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "spike1-mcp"
+path = "src/bin/spike1-mcp.rs"
+
+[dependencies]
+anyhow = "1"
+portable-pty = "0.9"
+rmcp = { version = "3", features = ["server", "transport-io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }
+tokio-tungstenite = "0.30"
+futures-util = "0.3"
+
+[profile.dev]
+# keep exploratory builds fast
+debug = 1

@@ -1,0 +1,11 @@
+{
+  "name": "spike1-host-web",
+  "private": true,
+  "description": "Vendored browser assets (xterm.js) and the e2e WS driver for spike1-host",
+  "type": "module",
+  "dependencies": {
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
+    "ws": "8.18.0"
+  }
+}
