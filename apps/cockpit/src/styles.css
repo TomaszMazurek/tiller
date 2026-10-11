@@ -1,0 +1,65 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #101014;
+  color: #e6e6e6;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-shell__dock {
+  flex: 1;
+}
+
+.panel-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #8b8b94;
+}
+
+.panel-placeholder h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #b9b9c3;
+}
+
+.panel-placeholder p {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  height: 28px;
+  padding: 0 0.75rem;
+  background: #16161c;
+  border-top: 1px solid #26262e;
+  font-size: 0.75rem;
+  color: #9a9aa4;
+  flex: none;
+}
+
+.status-bar__item--brand {
+  font-weight: 600;
+  color: #cfcfd8;
+}
+
+.status-bar__item--error {
+  color: #f87171;
+}

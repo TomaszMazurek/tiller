@@ -23,7 +23,7 @@ IDE dla **agent-only coding**: kod piszą agenty AI, człowiek steruje, przeglą
 - granice crate'ów rdzenia i trait narzędzi (wspólny mianownik dla UI, MCP i ewentualnego przyszłego własnego silnika),
 - agent jako klient rdzenia: MCP + ACP jako standardowe szwy integracyjne,
 - **transakcyjny model pracy**: worktree per zadanie, commit = checkpoint = jednostka review, **niezmienny kandydat review** (id zmiany + commit bazowy) powiązany z dowodami weryfikacji i zgodą człowieka, bramka zatwierdzenia na merge do głównego drzewa (integracja wymaga sprawdzenia aktualnej bazy),
-- **granica bezpieczeństwa wykonania obejmująca cały proces agenta i jego potomków** (pliki, sieć, sekrety) — `term` jest kontrolowanym interfejsem, nie jedyną zaporą — plus model uprawnień komend, sandbox i audit; nie dodatek na później,
+- **granica bezpieczeństwa wykonania obejmująca cały proces agenta i jego potomków** (pliki, sieć, sekrety) — `term` jest kontrolowanym interfejsem, nie jedyną zaporą — plus model uprawnień komend i audit; egzekwowanie wg core §3 zasada 6: potwierdzenia dla zaufanego agenta operatora, pełny sandbox przy profilu daemon/remote i agentach niezaufanych (PIVOT, §7); nie dodatek na później,
 - ewaluacja: wzorcowy zestaw zadań i metryka skuteczności, na którym mierzymy każdą decyzję narzędziową.
 
 **Części wymienne (odwracalne):**
@@ -47,7 +47,7 @@ IDE dla **agent-only coding**: kod piszą agenty AI, człowiek steruje, przeglą
 | Inteligencja języka | **LSP read-only** (diagnostyki, go-to-def, references w review) + **tree-sitter w rdzeniu** (indeks, kompresja kontekstu, diff) |
 | Weryfikacja | **Verify loop**: `cargo check`/`test` w worktree (autorytatywna); **fast loop**: diagnostyki LSP (best-effort, przyszłe narzędzie MCP) |
 | Transakcje | **Worktree per zadanie**, jeden pisarz na worktree; **checkpoint = commit**; merge po zatwierdzeniu |
-| Bezpieczeństwo | **Granica wykonania na procesie agenta i potomkach** (fs, sieć, sekrety) + model uprawnień komend: allowlista / potwierdzenie / zakaz; sandbox (decyzja Windows w Etapie 0); audit log |
+| Bezpieczeństwo | **Granica wykonania na procesie agenta i potomkach** (fs, sieć, sekrety) + model uprawnień komend: allowlista / potwierdzenie / zakaz; sandbox dopiero przy profilu daemon/remote lub agentach niezaufanych (PIVOT §7; decyzja Windows wówczas); audit log |
 | Języki wspierane | **Rust nr 1** (MVP), C++ nr 2 |
 | Platformy | **Windows-first**; CI od początku Windows/Linux/macOS |
 | Tryb pracy | **Solo**, z granicami crate'ów gotowymi na zespół |
@@ -122,7 +122,7 @@ crates/
 3. UI rozmawia własnym wąskim protokołem JSON-RPC; agenty — przez MCP/ACP; wspólny mianownik: **trait narzędzi w `core`**.
 4. **Transakcje pracy:** zadanie → `orch` przydziela worktree → agent pracuje swobodnie (czyta przez narzędzia, pisze pliki, uruchamia weryfikację) → checkpointy jako commity → **niezmienny kandydat review** (id zmiany + commit bazowy) z diffem, transkryptem i wynikami bramek → człowiek approve/merge albo request changes. Zmiana kandydata **unieważnia zgodę**; merge sprawdza się względem **aktualnej bazy** (rebase + weryfikacja). Rollback = zatrzymanie pisarza, potem reset worktree wraz z plikami nieśledzonymi; skutki komend poza repo są poza gwarancją rollbacku (ale w audycie).
 5. **Dwa wątki weryfikacji:** verify loop (cargo check/test, autorytatywny, w worktree) i fast loop (diagnostyki LSP, best-effort — docelowo narzędzie MCP).
-6. **Bezpieczeństwo wykonania:** granica obejmuje **cały proces agenta i jego potomków** (dostęp do plików, sieci, sekretów), nie tylko wywołania przez `term` — agent nie może obejść polityki własnym shellem czy bezpośrednim zapisem plików. `term` jest kontrolowanym interfejsem; klasyfikacja komend (allowlista / potwierdzenie / zakaz), sandbox, sekrety poza środowiskiem agenta domyślnie, pełny audit. Spike 5 testuje próby obejścia.
+6. **Bezpieczeństwo wykonania:** granica obejmuje **cały proces agenta i jego potomków** (dostęp do plików, sieci, sekretów), nie tylko wywołania przez `term` — agent nie może obejść polityki własnym shellem czy bezpośrednim zapisem plików. `term` jest kontrolowanym interfejsem; klasyfikacja komend (allowlista / potwierdzenie / zakaz), sekrety poza środowiskiem agenta domyślnie, pełny audit; pełny sandbox — dopiero przy profilu daemon/remote lub agentach niezaufanych (PIVOT §7), do tego czasu nie-readonly wyłącznie za potwierdzeniem operatora. Spike 5 testuje próby obejścia.
 7. Rdzeń publikuje zdarzenia; kokpit i moduły je subskrybują (dziedziczone z v3).
 8. tree-sitter żyje **tylko w rdzeniu** (indeks, kompresja, diff); podświetlanie w UI przez Lezer/Shiki.
 
@@ -134,7 +134,7 @@ crates/
 - wykonanie kodu projektu — osobna klasa: `cargo check`/`build`/`test` uruchamiają `build.rs` i makra proceduralne, więc **nie są readonly**; dopuszczalne tylko w sandbox albo za potwierdzeniem,
 - potwierdzenie człowieka (instalacje, mutacje poza worktree, sieć),
 - zakaz domyślny (kasowanie poza worktree, sekrety, zmiany konfiguracji IDE).
-- Sandbox na Windows: WSL2 vs ograniczenia procesu — spike decyduje.
+- Sandbox na Windows (WSL2 vs ograniczenia procesu): decyzja odroczona do profilu daemon/remote lub agentów niezaufanych (PIVOT §7); do tego czasu operacje nie-readonly wyłącznie za potwierdzeniem operatora.
 - Audit: każda komenda + transkrypt agenta tworzą timeline (co, dlaczego, z jakim skutkiem).
 
 **Ewaluacja (Spike 0, przed budową):**
@@ -144,6 +144,8 @@ crates/
 
 ## 7. Plan działania
 
+**PIVOT (2026-10-11):** Spike 1 wykonany zdjął najwyższe ryzyko (PTY/DSR — ConPTY okazał się wiarygodny), więc **Etap 0 skracamy** i przechodzimy na cienkie plastrze produkcyjne. Spike 2 (transakcje) i Spike 3 (pętla naprawcza) **wchłaniane jako plastry produkcyjne P5/P7**; Spike 0 (ewaluacja) **foldowany w dogfooding** (zadania Tiller = zadania wzorcowe); Spike 5 (pełny sandbox) **odroczony do profilu daemon/remote lub hostowania agentów niezaufanych** — do tego czasu granica wykonania z core §3 zasada 6 egzekwowana jest **ścieżką potwierdzeń**: P3 hostuje wyłącznie zaufanego agenta operatora, `term` pozostaje kontrolowanym interfejsem, a operacje nie-readonly (w tym `cargo check`/`build`/`test` jako osobna klasa) wymagają potwierdzenia operatora (permission-gate / bramki); Spike 4 (kontekst) bez zmian — pozostaje przy Etapie 4. Nowa sekwencja plastrów **P1–P8**: **P1** szkielet kokpitu (workspace + rdzeń + wąski rpc + Tauri/dockview + CI), **P2** term (PTY), **P3** hosting Pi, **P4** obserwacja sesji, **P5** transakcje, **P6** diff + review, **P7** bramki, **P8** dogfooding switch.
+
 **Etap 0: walidacja (spike'i, 2–3 tygodnie)**
 - **Spike 0 — ewaluacja:** zadania wzorcowe + metryka + baseline.
 - **Spike 1 — adapter Pi (warunek MVP, najwyższy priorytet):** uruchomienie zadania, zdarzenia strukturalne (komunikaty, wywołania narzędzi), anulowanie/steering, zatwierdzenia, zakończenie. Rozstrzyga hipotezę ACP/MCP/PTY i dokumentuje, co Pi faktycznie udostępnia.
@@ -152,12 +154,13 @@ crates/
 - **Spike 2 — transakcje i integralność review:** worktree per zadanie, checkpointy jako commity, kandydat review (id + baza), unieważnienie zgody przy zmianie kandydata, merge względem aktualnej bazy, rollback ze zatrzymaniem pisarza i plikami nieśledzonymi.
 - **Spike 3 — pętla naprawcza:** agent edytuje w worktree, `cargo check`/`test` jako bramka; realne czasy i częstotliwość wywołań.
 - **Spike 4 — kontekst:** skeleton AST vs wyszukiwanie na żądanie, mierzone na zadaniach ze Spike'a 0.
-- **Spike 5 — bezpieczeństwo:** granica wykonania na procesie agenta i potomkach (fs, sieć, sekrety), sandbox Windows (WSL2 vs restricted token), testy obejścia `term` natywnymi narzędziami agenta.
+- **Spike 5 — bezpieczeństwo** (odroczony — PIVOT §7 — do profilu daemon/remote lub agentów niezaufanych): granica wykonania na procesie agenta i potomkach (fs, sieć, sekrety), sandbox Windows (WSL2 vs restricted token), testy obejścia `term` natywnymi narzędziami agenta.
 
 Równoległość agentów celowo **nie** jest walidowana w Etapie 0 — dopiero w Etapie 4, po ustabilizowanym pionowym plastrowym przepływie.
 
 **Etap 1: szkielet kokpitu**
-- Tauri 2 + React + dockview: layout kokpitu, streaming JSON-RPC, timeline agenta, panel sterowania.
+- Tauri 2 + React + dockview: layout kokpitu (zrealizowany w P1); streaming JSON-RPC i subskrypcje zdarzeń — P4+; zamiast timeline'a agenta i panelu sterowania: statusy agentów pochodne z obserwacji sesji JSONL i gita, sterowanie zostaje w terminalu (§5 zasada 2).
+- *Stan (P1):* zakres szkieletu kokpitu zrealizował plaster P1; streaming/subskrypcje zdarzeń to późniejszy zakres (P4+) — Etap 1 nie jest osobnym krokiem.
 
 **Etap 2: ręce (minimalny zestaw dla plastra)**
 - Hosting Pi w terminalu (PTY + xterm.js, TUI agenta; steering i zatwierdzenia w terminalu, rozszerzenie permission-gate zarządzane przez IDE); minimalny serwer MCP na `rmcp`: odczyt plików, proste szukanie, `term` z polityką; worktree/checkpointy w `orch`/`git`; obserwacja pracy: tail sesji JSONL. Tryb RPC (pipes) dopiero dla zadań tło w późniejszym etapie. Indeks i LSP jako narzędzia MCP celowo dopiero w Etapie 4 — plaster ma być cienki.

@@ -1,0 +1,12 @@
+[package]
+name = "tiller-core"
+description = "Tiller core: workspace model, events, and the tool seam shared by UI and agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

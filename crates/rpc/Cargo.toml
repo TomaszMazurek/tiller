@@ -1,0 +1,11 @@
+[package]
+name = "tiller-rpc"
+description = "Narrow JSON-RPC protocol between the cockpit UI and the Tiller core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tiller-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

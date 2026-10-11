@@ -2,3 +2,6 @@
 target/
 node_modules/
 dist/
+
+# Tauri desktop app: generated schemas (and mobile artifacts if ever enabled)
+/apps/cockpit/src-tauri/gen/
