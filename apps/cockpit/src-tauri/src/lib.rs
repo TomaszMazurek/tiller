@@ -3,6 +3,7 @@
 
 mod dispatch;
 mod sandbox;
+mod session_tail;
 mod term_host;
 
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tiller_rpc::{Dispatcher, RequestId, RpcError, RpcRequest, RpcResponse, INVAL
 
 // Re-exported for the integration tests and the `pi_smoke` example.
 pub use dispatch::{CockpitDispatcher, SESSION_NOT_FOUND};
+pub use session_tail::{TimelineEntry, EVENT_ENTRY};
 pub use term_host::{
     EventSink, PtySessionFactory, SessionId, SessionManager, SessionStats, SpawnSpec, TermError,
     TermExit, EVENT_EXIT, EVENT_OUTPUT,

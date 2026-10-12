@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
@@ -61,7 +61,12 @@ function createXtermSurface(container: HTMLElement): TerminalSurface {
  * unit tests drive with injected fakes because xterm.js cannot mount
  * under jsdom (it needs a canvas).
  */
-export function TerminalPanel(_props: IDockviewPanelProps) {
+export interface TerminalPanelProps extends IDockviewPanelProps {
+  /** Reports the live session id upward (the timeline observes it). */
+  onActiveSessionChange?: (sessionId: import('../lib/termApi').SessionId | null) => void;
+}
+
+export function TerminalPanel({ onActiveSessionChange }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [program, setProgram] = useState(DEFAULT_PROGRAM);
   // No machine-specific default (a wrong cwd fails the spawn on any other
@@ -87,6 +92,12 @@ export function TerminalPanel(_props: IDockviewPanelProps) {
     [],
   );
   const { state, start, kill } = useTerminalSession(containerRef, deps);
+
+  // The lifted session id (App state): the reducer already nulls it on a
+  // restart request, so the timeline resets with the terminal.
+  useEffect(() => {
+    onActiveSessionChange?.(state.sessionId);
+  }, [state.sessionId, onActiveSessionChange]);
 
   const running = state.status === 'running';
   const busy = state.status === 'starting';

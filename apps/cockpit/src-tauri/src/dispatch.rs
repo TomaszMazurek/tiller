@@ -1,5 +1,6 @@
 //! The cockpit dispatcher: `core.*` delegated to [`CoreDispatcher`], the
-//! `term.*` surface served by the session manager.
+//! `term.*` surface served by the session manager, and `session.observe`
+//! for the timeline snapshot.
 //!
 //! Wire shapes (params always an object; unknown fields rejected so a typo
 //! cannot silently drop a write):
@@ -10,6 +11,10 @@
 //! - `term.resize` `{session_id, cols, rows}` → `{}`
 //! - `term.kill` `{session_id}` → `{}`
 //! - `term.stats` `{session_id}` → `{dsr_responses_sent}`
+//! - `session.observe` `{session_id}` → `{entries: [TimelineEntry…]}` —
+//!   the timeline snapshot so far; live entries keep flowing as
+//!   `session.entry` notifications (the tailer runs from spawn, so
+//!   observe is purely the catch-up read).
 //!
 //! Error codes: shape/decoding problems are `INVALID_PARAMS` (-32602);
 //! unknown methods `METHOD_NOT_FOUND` (-32601); an id with no live session
@@ -26,6 +31,7 @@ use tiller_rpc::{
     CoreDispatcher, Dispatcher, RpcError, RpcRequest, RpcResponse, INVALID_PARAMS, METHOD_NOT_FOUND,
 };
 
+use crate::session_tail::TimelineEntry;
 use crate::term_host::{base64_decode, SessionId, SessionManager, SpawnSpec, TermError};
 
 /// Application error: the session id is not (or no longer) live.
@@ -65,6 +71,29 @@ impl CockpitDispatcher {
             }
         };
         answer.map(|result| RpcResponse::ok(id, result))
+    }
+
+    fn dispatch_session(&self, method: &str, req: RpcRequest) -> Result<RpcResponse, RpcError> {
+        let id = req.id.clone();
+        let answer = match method {
+            "observe" => self
+                .session_observe(req.params)
+                .map(|entries| serde_json::json!({ "entries": entries })),
+            other => {
+                return Err(RpcError::new(
+                    METHOD_NOT_FOUND,
+                    format!("unknown method: session.{other}"),
+                ))
+            }
+        };
+        answer.map(|result| RpcResponse::ok(id, result))
+    }
+
+    fn session_observe(&self, params: serde_json::Value) -> Result<Vec<TimelineEntry>, RpcError> {
+        let params: ObserveParams = parse_params("session.observe", params)?;
+        self.terms
+            .observe_entries(params.session_id)
+            .map_err(term_error)
     }
 
     fn term_spawn(&self, params: serde_json::Value) -> Result<SessionId, RpcError> {
@@ -132,9 +161,14 @@ impl Dispatcher for CockpitDispatcher {
         match req.method.strip_prefix("term.").map(str::to_string) {
             // The whole term.* surface is ours…
             Some(rest) => self.dispatch_term(&rest, req),
-            // …everything else (core.* today, later core surfaces) goes to
-            // the core dispatcher verbatim, including its METHOD_NOT_FOUND.
-            None => self.core.dispatch(req),
+            None => match req.method.strip_prefix("session.").map(str::to_string) {
+                // …the session.* timeline surface likewise…
+                Some(rest) => self.dispatch_session(&rest, req),
+                // …everything else (core.* today, later core surfaces) goes
+                // to the core dispatcher verbatim, including its
+                // METHOD_NOT_FOUND.
+                None => self.core.dispatch(req),
+            },
         }
     }
 }
@@ -210,6 +244,12 @@ struct ResizeParams {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KillParams {
+    session_id: SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveParams {
     session_id: SessionId,
 }
 
@@ -424,6 +464,98 @@ mod tests {
         let error = dispatch_err(&dispatcher, "term.nope", serde_json::json!({}));
         assert_eq!(error.code, METHOD_NOT_FOUND);
         assert!(error.message.contains("term.nope"));
+    }
+
+    #[test]
+    fn session_observe_snapshots_the_session_file() {
+        let (dispatcher, factory) = dispatcher();
+        // A pi session (fake PTY) with a session file already written.
+        dispatch_ok(
+            &dispatcher,
+            "term.spawn",
+            serde_json::json!({ "program": "pi", "cwd": "C:/Repos/tiller" }),
+        );
+        let sandbox = factory.specs.lock().unwrap()[0]
+            .env
+            .iter()
+            .find(|(k, _)| k == "PI_CODING_AGENT_DIR")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .expect("sandbox env");
+        let sessions = sandbox.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("s.jsonl"),
+            concat!(
+                r#"{"type":"session","version":3,"id":"u","timestamp":"t"}"#,
+                "\n",
+                r#"{"type":"message","id":"1","timestamp":"t1","message":{"role":"user","content":[{"type":"text","text":"snapshot me"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let result = dispatch_ok(
+            &dispatcher,
+            "session.observe",
+            serde_json::json!({ "session_id": 1 }),
+        );
+        assert_eq!(
+            result["entries"],
+            serde_json::json!([
+                { "kind": "message", "id": "1", "role": "user", "ts": "t1", "chars": 11, "blocks": 1 }
+            ])
+        );
+    }
+
+    #[test]
+    fn session_observe_empty_without_file_and_errors_for_foreign_ids() {
+        let (dispatcher, _factory) = dispatcher();
+        // No session file yet (pi creates it lazily): empty, not an error.
+        dispatch_ok(
+            &dispatcher,
+            "term.spawn",
+            serde_json::json!({ "program": "pi", "cwd": "C:/Repos/tiller" }),
+        );
+        let result = dispatch_ok(
+            &dispatcher,
+            "session.observe",
+            serde_json::json!({ "session_id": 1 }),
+        );
+        assert_eq!(result["entries"], serde_json::json!([]));
+
+        // A foreign id: SESSION_NOT_FOUND, consistently with term.*.
+        let error = dispatch_err(
+            &dispatcher,
+            "session.observe",
+            serde_json::json!({ "session_id": 99 }),
+        );
+        assert_eq!(error.code, SESSION_NOT_FOUND);
+        assert!(error.message.contains("99"));
+    }
+
+    #[test]
+    fn session_observe_validates_params() {
+        let (dispatcher, _factory) = dispatcher();
+        for (params, message_part) in [
+            (serde_json::json!({}), "session_id"),
+            (serde_json::json!({ "session_id": "one" }), "bad params"),
+            (
+                serde_json::json!({ "session_id": 1, "extra": true }),
+                "bad params",
+            ),
+            (serde_json::json!([1]), "params must be an object"),
+        ] {
+            let error = dispatch_err(&dispatcher, "session.observe", params);
+            assert_eq!(error.code, INVALID_PARAMS, "{error:?}");
+            assert!(
+                error.message.contains(message_part),
+                "message {:?} should mention {message_part}",
+                error.message
+            );
+        }
+        let error = dispatch_err(&dispatcher, "session.nope", serde_json::json!({}));
+        assert_eq!(error.code, METHOD_NOT_FOUND);
+        assert!(error.message.contains("session.nope"));
     }
 
     #[test]

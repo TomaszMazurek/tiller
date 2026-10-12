@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -37,6 +37,7 @@ use serde_json::json;
 use tiller_term::{PtySession, SpawnConfig};
 
 use crate::sandbox;
+use crate::session_tail::{self, TailerHandle, TimelineEntry};
 
 /// Tauri event carrying one output chunk: `{session_id, data}` (base64).
 pub const EVENT_OUTPUT: &str = "term.output";
@@ -239,6 +240,9 @@ impl std::fmt::Display for TermError {
 
 struct ManagerInner {
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
+    /// Sandbox dir per pi session (the observation timeline's data
+    /// source; see [`SessionManager::observe_entries`]).
+    sandboxes: Mutex<HashMap<SessionId, PathBuf>>,
     next_id: AtomicU64,
     sink: Arc<dyn EventSink>,
     factory: Arc<dyn SessionFactory>,
@@ -268,6 +272,7 @@ impl SessionManager {
         Self {
             inner: Arc::new(ManagerInner {
                 sessions: Mutex::new(HashMap::new()),
+                sandboxes: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 sink,
                 factory,
@@ -323,6 +328,23 @@ impl SessionManager {
                 commands: cmd_tx,
             },
         );
+        // Pi sessions are observed from spawn: the tailer turns the
+        // session JSONL pi writes in its sandbox into `session.entry`
+        // notifications (see [`crate::session_tail`]). Auto-start rather
+        // than observe-on-demand: zero UI coupling, the timeline works
+        // from the first second, and the tailer simply waits out pi's
+        // lazy session-file creation.
+        let tailer = sandbox_dir.clone().map(|dir| {
+            inner.sandboxes.lock().unwrap().insert(id, dir.clone());
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_for_thread = Arc::clone(&stop);
+            let tailer_sink = Arc::clone(&inner.sink);
+            let handle = std::thread::Builder::new()
+                .name(format!("tiller-session-tail-{id}"))
+                .spawn(move || session_tail::run_tailer(tailer_sink, id, dir, stop_for_thread))
+                .expect("spawn session tailer");
+            (stop, handle)
+        });
         // No `Arc` back into the manager: a strong actor→manager ref would
         // keep the sessions map (and this very command sender) alive after
         // the last `SessionManager` clone drops, and the declared
@@ -333,9 +355,19 @@ impl SessionManager {
         let manager = Arc::downgrade(&inner);
         std::thread::Builder::new()
             .name(format!("tiller-term-host-{id}"))
-            .spawn(move || run_session(manager, sink, id, sandbox_dir, session, cmd_rx))
+            .spawn(move || run_session(manager, sink, id, sandbox_dir, tailer, session, cmd_rx))
             .expect("spawn session actor");
         Ok(id)
+    }
+
+    /// Snapshot of a live session's observed timeline: the entries
+    /// parsed from the session file so far (pi sessions only — a session
+    /// without a sandbox observes as empty; a pi session with no session
+    /// file yet likewise, not an error: pi creates it lazily).
+    pub fn observe_entries(&self, id: SessionId) -> Result<Vec<TimelineEntry>, TermError> {
+        self.handle(id)?;
+        let sandbox = self.inner.sandboxes.lock().unwrap().get(&id).cloned();
+        Ok(sandbox.map_or_else(Vec::new, |dir| session_tail::snapshot(&dir)))
     }
 
     /// Write input bytes; blocks until the session actor drained them.
@@ -391,6 +423,7 @@ fn run_session(
     sink: Arc<dyn EventSink>,
     id: SessionId,
     sandbox_dir: Option<PathBuf>,
+    tailer: Option<TailerHandle>,
     session: Box<dyn HostedSession>,
     commands: Receiver<SessionCommand>,
 ) {
@@ -430,6 +463,14 @@ fn run_session(
     }
     let exit = session.wait_exit();
     let dsr_responses_sent = session.dsr_responses_sent();
+    // Wind the observation tailer down before announcing the exit: the
+    // join guarantees the tailer thread never outlives its session
+    // actor, and every `session.entry` of this session precedes its
+    // `term.exit` on the wire (its final drain runs while stopped).
+    if let Some((stop, handle)) = tailer {
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+    }
     sink.emit(
         EVENT_EXIT,
         json!({
@@ -444,6 +485,7 @@ fn run_session(
     // teardown); only a live one still has a map entry to remove.
     if let Some(inner) = manager.upgrade() {
         inner.sessions.lock().unwrap().remove(&id);
+        inner.sandboxes.lock().unwrap().remove(&id);
     }
     if let Some(dir) = &sandbox_dir {
         // Best-effort sandbox delete: a locked file on Windows must not
@@ -1016,6 +1058,124 @@ mod tests {
             })
             .collect();
         assert_eq!(positions.len(), 2, "one output, one exit: {events:?}");
+    }
+
+    /// The sandbox dir of a spawned fake-pi session (from the env the
+    /// manager set), with its `sessions` dir ready for a session file.
+    fn pi_sandbox_with_sessions_dir(factory: &FakeFactory) -> PathBuf {
+        let env_dir = factory.specs.lock().unwrap()[0]
+            .env
+            .iter()
+            .find(|(k, _)| k == "PI_CODING_AGENT_DIR")
+            .map(|(_, v)| PathBuf::from(v))
+            .expect("pi sandbox env");
+        std::fs::create_dir_all(env_dir.join("sessions")).unwrap();
+        env_dir
+    }
+
+    /// Write a session file under `sandbox/sessions/{slug}/…` (pi 1.1.0's
+    /// per-project layout — discovery must search the subtree).
+    fn write_session_file(sandbox: &Path, slug: &str, contents: &str) {
+        let dir = sandbox.join("sessions").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s.jsonl"), contents).unwrap();
+    }
+
+    const SESSION_USER_LINE: &str = r#"{"type":"message","id":"1","timestamp":"2026-10-11T12:42:05.554Z","message":{"role":"user","content":[{"type":"text","text":"hello timeline"}]}}"#;
+
+    #[test]
+    fn pi_session_is_observed_live_from_spawn() {
+        let factory = FakeFactory::new();
+        let (manager, sink, _root) = manager_with(factory.clone());
+        let mut spec = basic_spec("pi");
+        spec.cwd = Some(PathBuf::from("C:/Repos/tiller"));
+        let id = manager.spawn_session(spec).expect("spawn");
+
+        // pi creates the session file lazily (first message, not boot):
+        // nothing is observed until the file shows up in the sandbox.
+        let sandbox = pi_sandbox_with_sessions_dir(&factory);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(manager.observe_entries(id).unwrap().is_empty());
+
+        write_session_file(&sandbox, "--slug--", &format!("{SESSION_USER_LINE}\n"));
+
+        // The auto-started tailer streams it as `session.entry`.
+        let (_, payload) =
+            sink.wait_for(WAIT, |event, _| event == crate::session_tail::EVENT_ENTRY);
+        assert_eq!(payload["session_id"], id);
+        assert_eq!(payload["entry"]["kind"], "message");
+        assert_eq!(payload["entry"]["role"], "user");
+        assert_eq!(payload["entry"]["chars"], "hello timeline".chars().count());
+
+        // The snapshot rpc sees the same entries.
+        let snapshot = manager.observe_entries(id).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert!(
+            matches!(&snapshot[0], TimelineEntry::Message { id, .. } if id == "1"),
+            "{snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn observe_is_empty_without_sandbox_or_file_and_gone_for_dead_ids() {
+        let factory = FakeFactory::new();
+        let (manager, _sink, _root) = manager_with(factory.clone());
+
+        // A non-pi session: live, but nothing to observe.
+        let cmd_id = manager.spawn_session(basic_spec("cmd.exe")).unwrap();
+        assert!(manager.observe_entries(cmd_id).unwrap().is_empty());
+
+        // A pi session whose session file does not exist yet: empty, not
+        // an error.
+        let mut spec = basic_spec("pi");
+        spec.cwd = Some(PathBuf::from("C:/Repos/tiller"));
+        let pi_id = manager.spawn_session(spec).unwrap();
+        assert!(manager.observe_entries(pi_id).unwrap().is_empty());
+
+        // Foreign/dead ids: SessionGone, consistently with term.*.
+        assert!(matches!(
+            manager.observe_entries(999),
+            Err(TermError::SessionGone(999))
+        ));
+    }
+
+    #[test]
+    fn tailer_entries_precede_exit_and_thread_ends_before_cleanup() {
+        let factory = FakeFactory::new();
+        let (manager, sink, _root) = manager_with(factory.clone());
+        let mut spec = basic_spec("pi");
+        spec.cwd = Some(PathBuf::from("C:/Repos/tiller"));
+        let id = manager.spawn_session(spec).expect("spawn");
+        let sandbox = pi_sandbox_with_sessions_dir(&factory);
+        write_session_file(&sandbox, "flat", &format!("{SESSION_USER_LINE}\n"));
+        sink.wait_for(WAIT, |event, _| event == crate::session_tail::EVENT_ENTRY);
+
+        // Session end: every session.entry precedes term.exit (the actor
+        // joins the tailer before announcing the exit), and the sandbox
+        // cleanup — which runs after that join — completing proves the
+        // tailer thread was already wound down (a stalled join would
+        // hang this assertion, not leak the thread).
+        factory.session(0).finish(TermExit {
+            exit_code: 0,
+            signal: None,
+            success: true,
+        });
+        sink.wait_for(WAIT, |event, p| {
+            event == EVENT_EXIT && p["session_id"] == id
+        });
+        eventually(|| !sandbox.exists(), "sandbox removed after exit");
+        {
+            let events = sink.events.lock().unwrap();
+            let entry_at = events
+                .iter()
+                .position(|(name, _)| name == crate::session_tail::EVENT_ENTRY)
+                .expect("an entry event");
+            let exit_at = events
+                .iter()
+                .position(|(name, _)| name == EVENT_EXIT)
+                .expect("an exit event");
+            assert!(entry_at < exit_at, "entries precede exit: {events:?}");
+        }
     }
 
     /// Poll `f` until it returns `true` (bounded), so lifecycle races in
