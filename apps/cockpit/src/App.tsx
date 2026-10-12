@@ -1,6 +1,7 @@
 import { DockviewReact, type DockviewReadyEvent } from 'dockview-react';
 import { StatusBar } from './components/StatusBar';
-import { DiffPanel, TerminalPanel, TimelinePanel } from './panels/PlaceholderPanels';
+import { DiffPanel, TimelinePanel } from './panels/PlaceholderPanels';
+import { TerminalPanel } from './panels/TerminalPanel';
 
 const components = {
   terminal: TerminalPanel,
