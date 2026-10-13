@@ -85,6 +85,23 @@ describe('TerminalPanel tool dropdown', () => {
     expect(spawn.mock.calls[0][0].cwd).toBe('C:/tmp/project');
   });
 
+  it('cwd comes prefilled with the Tiller project default (operator request)', async () => {
+    const { deps, spawn } = createDeps();
+    mountPanel(deps);
+
+    // No fillCwd: the prefill alone must satisfy the validation and spawn
+    // pi in the default project directory.
+    expect((screen.getByTestId('terminal-cwd') as HTMLInputElement).value).toBe(
+      'C:/Repos/tiller'
+    );
+    fireEvent.click(screen.getByTestId('terminal-start'));
+
+    await waitFor(() => {
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+    expect(spawn.mock.calls[0][0].cwd).toBe('C:/Repos/tiller');
+  });
+
   it('cmd preset spawns cmd.exe and locks the toolbar while running', async () => {
     const { deps, spawn } = createDeps();
     mountPanel(deps);

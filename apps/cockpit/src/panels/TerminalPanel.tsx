@@ -32,6 +32,10 @@ interface ToolPreset {
   program: string | null;
 }
 
+/** Prefilled cwd (operator request, 2026-10-13): the Tiller project —
+ * pi opens there when no other directory is given. Editable; empty blocks Start. */
+const DEFAULT_CWD = 'C:/Repos/tiller';
+
 const TOOL_PRESETS: readonly ToolPreset[] = [
   // `pi` keeps the bare name: the backend's sandbox heuristic (P3a)
   // matches on it; cmd.exe/powershell.exe correctly get no sandbox.
@@ -96,10 +100,10 @@ export function TerminalPanel({ onActiveSessionChange, deps: depsProp }: Termina
   // Free-text program — only the `custom` preset reads it. Starts empty,
   // so Start stays disabled until the operator names the program.
   const [customProgram, setCustomProgram] = useState('');
-  // No machine-specific default (a wrong cwd fails the spawn on any other
-  // machine): the operator names the project directory; Start stays
-  // disabled until the tool (for `custom`: a typed program) and cwd are set.
-  const [cwd, setCwd] = useState('');
+  // Operator-directed default (2026-10-13): pi opens in the Tiller project
+  // when no other cwd is given. Visible and editable — clearing it still
+  // blocks Start, so the default cannot silently spawn a wrong directory.
+  const [cwd, setCwd] = useState(DEFAULT_CWD);
   const preset = TOOL_PRESETS.find((entry) => entry.id === toolId) ?? TOOL_PRESETS[0];
   const program = preset.program ?? customProgram;
 
