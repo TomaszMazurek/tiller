@@ -1,6 +1,6 @@
 /**
  * Binary-safe base64 helpers for the terminal wire (`term.write` input,
- * `term.output` payloads are base64 strings of raw PTY bytes).
+ * `term:output` payloads are base64 strings of raw PTY bytes).
  *
  * `btoa`/`atob` alone are not binary-safe (they operate on DOM strings),
  * so byte arrays are carried through a chunked binary string. The chunk

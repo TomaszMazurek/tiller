@@ -194,7 +194,7 @@ export function useTerminalSession(
         surface.onData((data) => {
           const id = sessionIdRef.current;
           if (id !== null) {
-            // The backend reports gone sessions via term.exit; a lost
+            // The backend reports gone sessions via term:exit; a lost
             // keystroke at teardown is not worth a UI error.
             void deps.write(id, encoder.encode(data)).catch(() => undefined);
           }

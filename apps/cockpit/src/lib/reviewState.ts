@@ -133,7 +133,7 @@ export type ReviewAction =
   /** The post-run evidence fetch gave up (backend still `running` after
    * retries): keep the event-derived entries, surface the lag. */
   | { type: 'evidencePending' }
-  /** A `task.gate` event for the selected task (the panel pre-filters by
+  /** A `task:gate` event for the selected task (the panel pre-filters by
    * repo+task; `currentCandidate` maintains staleness). */
   | { type: 'gateEvent'; event: TaskGateEvent; currentCandidate: string | null };
 

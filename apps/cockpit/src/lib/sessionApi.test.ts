@@ -52,7 +52,7 @@ describe('sessionObserve', () => {
 });
 
 describe('subscribeSessionEntry', () => {
-  it('listens on session.entry and unwraps the payload', async () => {
+  it('listens on session:entry and unwraps the payload', async () => {
     const seen: Array<{ session_id: number; entry: unknown }> = [];
     const unlisten = vi.fn();
     const handlers = new Map<string, (event: { payload: unknown }) => void>();
@@ -65,8 +65,8 @@ describe('subscribeSessionEntry', () => {
     }) as TermListenFn;
 
     await subscribeSessionEntry((e) => seen.push(e), listenFn);
-    expect([...handlers.keys()]).toEqual(['session.entry']);
-    handlers.get('session.entry')?.({
+    expect([...handlers.keys()]).toEqual(['session:entry']);
+    handlers.get('session:entry')?.({
       payload: {
         session_id: 2,
         entry: {

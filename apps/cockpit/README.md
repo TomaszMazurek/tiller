@@ -27,6 +27,8 @@ comes from `tiller-core` through the `rpc` Tauri command (`core.version`).
 ## Other commands
 
 - `npm test` — vitest suite (rpc client, status bar)
+- `npm run e2e` — Playwright CDP smoke against the release exe (see
+  [`e2e/README.md`](e2e/README.md); Windows, release build required)
 - `npm run build` — type-check (`tsc --noEmit`) + production bundle
 - `npm run tauri build` — packaged desktop app (not used in CI)
 

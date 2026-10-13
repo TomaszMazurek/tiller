@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use cockpit_lib::{
     CockpitDispatcher, EventSink, PtySessionFactory, SessionManager, SpawnSpec, TaskHost,
-    SESSION_NOT_FOUND,
+    EVENT_EXIT, EVENT_OUTPUT, SESSION_NOT_FOUND,
 };
 use tiller_rpc::{Dispatcher, RequestId, RpcRequest};
 
@@ -86,14 +86,14 @@ impl RecordingSink {
 
 impl EventSink for RecordingSink {
     fn emit(&self, event: &str, payload: serde_json::Value) {
-        if event == "term.output" {
+        if event == EVENT_OUTPUT {
             use base64::Engine;
             let data = payload["data"].as_str().unwrap_or_default();
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
                 self.output.lock().unwrap().extend_from_slice(&bytes);
             }
         }
-        if event == "term.exit" {
+        if event == EVENT_EXIT {
             if let Some(dsr) = payload["dsr_responses_sent"].as_u64() {
                 self.dsr.store(dsr, Ordering::Relaxed);
             }
@@ -182,7 +182,7 @@ fn short_program_flow_spawn_output_exit() {
 
     sink.wait_for_output(b"pty-real-hello", WAIT);
     let exit = sink.wait_for(WAIT, |event, p| {
-        event == "term.exit" && p["session_id"] == id
+        event == EVENT_EXIT && p["session_id"] == id
     });
     assert_eq!(exit["exit_code"], 0);
     assert_eq!(exit["success"], true);
@@ -235,7 +235,7 @@ fn interactive_session_resize_write_kill() {
         serde_json::json!({ "session_id": id }),
     );
     let exit = sink.wait_for(WAIT, |event, p| {
-        event == "term.exit" && p["session_id"] == id
+        event == EVENT_EXIT && p["session_id"] == id
     });
     assert!(exit["exit_code"].is_u64(), "exit status reported: {exit}");
 }
@@ -243,7 +243,7 @@ fn interactive_session_resize_write_kill() {
 #[test]
 fn manager_drop_kills_long_running_process() {
     // Kill-on-disconnect with a real ConPTY child: `pause` never exits on
-    // its own, so an arriving `term.exit` after `drop(manager)` proves the
+    // its own, so an arriving `term:exit` after `drop(manager)` proves the
     // actor noticed the abandoned manager, killed the child and reaped it
     // — all inside the test budget.
     let sink = RecordingSink::new();
@@ -270,7 +270,7 @@ fn manager_drop_kills_long_running_process() {
     drop(manager);
 
     let exit = sink.wait_for(WAIT, |event, p| {
-        event == "term.exit" && p["session_id"] == id
+        event == EVENT_EXIT && p["session_id"] == id
     });
     assert!(exit["exit_code"].is_u64(), "exit status reported: {exit}");
 }

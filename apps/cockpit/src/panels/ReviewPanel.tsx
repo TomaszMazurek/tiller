@@ -281,7 +281,7 @@ export function ReviewPanel({ deps = defaultDeps, requestTerminal }: ReviewPanel
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gates, repo, selectedTaskId, deps]);
 
-  /** `task.gate` events for the selected task (repo+task filter; refs so
+  /** `task:gate` events for the selected task (repo+task filter; refs so
    * the subscription is mounted once but always sees fresh ids). */
   const repoRef = useRef(repo);
   repoRef.current = repo;
@@ -319,7 +319,7 @@ export function ReviewPanel({ deps = defaultDeps, requestTerminal }: ReviewPanel
   }, [deps]);
 
   /** Run Gates: async by contract — no busy flag, the entries go live via
-   * the started answer and then the `task.gate` events. */
+   * the started answer and then the `task:gate` events. */
   const onRunGates = () => {
     const currentRepo = state.repo;
     const taskId = state.selectedTaskId;

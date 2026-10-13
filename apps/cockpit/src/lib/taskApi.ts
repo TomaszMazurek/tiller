@@ -118,7 +118,7 @@ export interface GatesStarted {
   candidate: string;
 }
 
-/** `task.gate` event payload (status change per gate). */
+/** `task:gate` event payload (status change per gate). */
 export interface TaskGateEvent {
   repo?: string;
   task_id: string;
@@ -265,7 +265,7 @@ export async function taskDiscard(
 }
 
 /** Start the gates (default: both presets) — async; progress arrives as
- * `task.gate` events and the record lands via `task.gates`. */
+ * `task:gate` events and the record lands via `task.gates`. */
 export async function taskRunGates(
   repo: string,
   taskId: string,
@@ -288,17 +288,17 @@ export async function taskGates(
   return callTask('task.gates', { repo, task_id: taskId }, invokeFn);
 }
 
-/** Subscribe to `task.gate` notifications (see `termApi.ts` for the
+/** Subscribe to `task:gate` notifications (see `termApi.ts` for the
  * listen seam). */
 export function subscribeTaskGate(
   handler: (event: TaskGateEvent) => void,
   listenFn: TermListenFn = listen,
 ): Promise<UnlistenFn> {
-  return listenFn<TaskGateEvent>('task.gate', (event) => handler(event.payload));
+  return listenFn<TaskGateEvent>('task:gate', (event) => handler(event.payload));
 }
 
-/** Match a `task.gate` payload against a repo+task pair — the listen-side
- * filter the panel needs (`task.gate` is broadcast; `SessionEventGate`
+/** Match a `task:gate` payload against a repo+task pair — the listen-side
+ * filter the panel needs (`task:gate` is broadcast; `SessionEventGate`
  * would over-fit: it keys on a single session id adopted after spawn, this
  * is a plain two-field match). Events carry the repo string exactly as
  * the rpc caller passed it; a payload without `repo` matches any repo

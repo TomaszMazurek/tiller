@@ -32,5 +32,5 @@ export function subscribeSessionEntry(
   handler: (event: SessionEntryEvent) => void,
   listenFn: TermListenFn = listen,
 ): Promise<UnlistenFn> {
-  return listenFn<SessionEntryEvent>('session.entry', (event) => handler(event.payload));
+  return listenFn<SessionEntryEvent>('session:entry', (event) => handler(event.payload));
 }

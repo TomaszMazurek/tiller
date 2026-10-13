@@ -47,7 +47,7 @@ function createDeps() {
 }
 
 /** Deps whose `listenExit` captures the handler, so tests can end a
- * session the way the backend does — with a `term.exit` event. */
+ * session the way the backend does — with a `term:exit` event. */
 function createDepsWithExitCapture() {
   const { deps, spawn, kill } = createDeps();
   let exitHandler: ((event: TermExitEvent) => void) | null = null;

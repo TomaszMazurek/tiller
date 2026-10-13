@@ -15,7 +15,7 @@
 //! - `term.stats` `{session_id}` → `{dsr_responses_sent}`
 //! - `session.observe` `{session_id}` → `{entries: [TimelineEntry…]}` —
 //!   the timeline snapshot so far; live entries keep flowing as
-//!   `session.entry` notifications (the tailer runs from spawn, so
+//!   `session:entry` notifications (the tailer runs from spawn, so
 //!   observe is purely the catch-up read).
 //!
 //! Error codes: shape/decoding problems are `INVALID_PARAMS` (-32602);
@@ -120,7 +120,7 @@ impl CockpitDispatcher {
     /// - `task.run_gates {repo, task_id, gates?}` → `{started: [ids],
     ///   candidate}` — **async**: the gates (default: both presets)
     ///   run on a worker thread in the task worktree; per-gate progress
-    ///   arrives as `task.gate` events, the finished record via
+    ///   arrives as `task:gate` events, the finished record via
     ///   `task.gates`. Refuses a dirty worktree (checkpoint first) and a
     ///   task without checkpoints.
     /// - `task.gates {repo, task_id}` → `{running, candidate?, evidence?}`
@@ -257,7 +257,7 @@ impl CockpitDispatcher {
 
     /// `task.run_gates`: validate the gate list (default: every preset in
     /// run order), then hand the async start to the task host. The answer
-    /// is immediate; results live in `task.gate` events + `task.gates`.
+    /// is immediate; results live in `task:gate` events + `task.gates`.
     fn task_run_gates(&self, params: serde_json::Value) -> Result<GatesStarted, RpcError> {
         let params: RunGatesParams = parse_params("task.run_gates", params)?;
         require_non_empty("task.run_gates", "repo", &params.repo)?;

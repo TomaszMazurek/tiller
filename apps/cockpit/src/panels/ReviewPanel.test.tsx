@@ -461,7 +461,7 @@ function gateDeps(
 describe('ReviewPanel gates', () => {
   afterEach(() => cleanup());
 
-  it('Run Gates → live badges from task.gate events → settled badges', async () => {
+  it('Run Gates → live badges from task:gate events → settled badges', async () => {
     const { deps, emit } = gateDeps();
     loadRepo(deps);
     const button = await screen.findByTestId('review-run-gates');

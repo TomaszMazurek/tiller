@@ -29,7 +29,11 @@ export function StatusBar() {
   return (
     <footer className="status-bar" data-testid="status-bar">
       <span className="status-bar__item status-bar__item--brand">Tiller</span>
-      {state.version !== null && <span className="status-bar__item">core v{state.version}</span>}
+      {state.version !== null && (
+        <span className="status-bar__item" data-testid="status-version">
+          core v{state.version}
+        </span>
+      )}
       {state.error !== null && <span className="status-bar__item status-bar__item--error">rpc error: {state.error}</span>}
     </footer>
   );

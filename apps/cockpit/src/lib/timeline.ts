@@ -16,7 +16,7 @@
  * - `observeFailed` keeps everything visible: the session may have
  *   exited before observe answered (SESSION_NOT_FOUND) — the terminal
  *   already shows the exit status, the collected entries stay.
- * - `append` adds one live `session.entry` (deduped by `id` — unique
+ * - `append` adds one live `session:entry` (deduped by `id` — unique
  *   per session: pi's JSONL entry id, or the tool-call id).
  * - The list is capped ([`TIMELINE_CAP`]); entries falling off the head
  *   are counted in `droppedOlder` and surfaced as "… N older".
@@ -25,7 +25,7 @@
 import type { SessionId } from './termApi';
 
 /**
- * One `session.entry` payload entry (mirrors the Rust `TimelineEntry`).
+ * One `session:entry` payload entry (mirrors the Rust `TimelineEntry`).
  * Stats only — the wire never carries message text, tool arguments or
  * result content (privacy by structure, brief §5 rule 2).
  */
@@ -60,7 +60,7 @@ export type TimelineEntry =
       duration_ms: number;
     };
 
-/** `session.entry` notification payload. */
+/** `session:entry` notification payload. */
 export interface SessionEntryEvent {
   session_id: SessionId;
   entry: TimelineEntry;
@@ -87,7 +87,7 @@ export type TimelineAction =
   | { type: 'snapshot'; entries: TimelineEntry[] }
   /** `session.observe` rejected (session gone): keep what we have. */
   | { type: 'observeFailed' }
-  /** One live `session.entry` arrived. */
+  /** One live `session:entry` arrived. */
   | { type: 'append'; entry: TimelineEntry };
 
 export const initialTimelineState: TimelineState = {

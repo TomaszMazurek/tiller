@@ -2,7 +2,7 @@
  * Session event gate — the fix for the listen-before-spawn race.
  *
  * `term.spawn` is an async rpc: the backend can emit the session's whole
- * `term.output` and even `term.exit` before the spawn call resolves with
+ * `term:output` and even `term:exit` before the spawn call resolves with
  * the session id, so the UI must subscribe *before* spawning and then
  * match events against an id it does not know yet. The gate is that
  * matcher as pure, DOM-free logic:

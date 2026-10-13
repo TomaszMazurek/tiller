@@ -98,9 +98,9 @@ describe('subscribeTermOutput / subscribeTermExit', () => {
     const unlistenOutput = await subscribeTermOutput((e) => outputs.push(e), listenFn);
     const unlistenExit = await subscribeTermExit((e) => exits.push(e), listenFn);
 
-    expect([...handlers.keys()].sort()).toEqual(['term.exit', 'term.output']);
-    handlers.get('term.output')?.({ payload: { session_id: 1, data: 'aGkh' } });
-    handlers.get('term.exit')?.({
+    expect([...handlers.keys()].sort()).toEqual(['term:exit', 'term:output']);
+    handlers.get('term:output')?.({ payload: { session_id: 1, data: 'aGkh' } });
+    handlers.get('term:exit')?.({
       payload: { session_id: 1, exit_code: 0, success: true, dsr_responses_sent: 4 },
     });
     expect(outputs).toEqual([{ session_id: 1, data: 'aGkh' }]);

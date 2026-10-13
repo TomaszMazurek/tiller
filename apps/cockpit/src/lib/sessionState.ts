@@ -22,7 +22,7 @@ export type TerminalSessionAction =
   | { type: 'spawnRequested' }
   /** The backend answered with a live session id. */
   | { type: 'spawned'; sessionId: SessionId }
-  /** `term.exit` arrived for our session. */
+  /** `term:exit` arrived for our session. */
   | { type: 'exited'; sessionId: SessionId; exitCode: number; signal?: string | null }
   /** An rpc call failed (spawn error, write error…). */
   | { type: 'failed'; message: string }

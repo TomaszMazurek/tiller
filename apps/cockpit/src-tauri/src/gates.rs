@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 /// Tauri event name for one gate's status change (`running` → final).
-pub const EVENT_GATE: &str = "task.gate";
+pub const EVENT_GATE: &str = "task:gate";
 
 /// Per-gate wall-clock budget. Generous on purpose: a cold `cargo test`
 /// on a workspace can legitimately take minutes; the timeout exists to

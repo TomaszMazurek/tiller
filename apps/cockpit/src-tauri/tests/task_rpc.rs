@@ -559,7 +559,7 @@ fn gate_events(sink: &RecordingSink) -> Vec<(String, serde_json::Value)> {
     sink.events.lock().unwrap().clone()
 }
 
-/// The whole async flow: started answer, `task.gate` events (running →
+/// The whole async flow: started answer, `task:gate` events (running →
 /// final per gate), the running flag mid-run, and the finished evidence
 /// bound to the candidate with log tails capped.
 #[test]
@@ -659,7 +659,7 @@ fn run_gates_full_flow_events_running_flag_and_evidence() {
     // all four events: running+final per gate, in order
     let events = gate_events(&sink);
     assert_eq!(events.len(), 4);
-    assert!(events.iter().all(|(name, _)| name == "task.gate"));
+    assert!(events.iter().all(|(name, _)| name == "task:gate"));
     assert_eq!(events[2].1["id"], "cargo-test");
     assert_eq!(events[2].1["status"], "running");
     assert_eq!(events[3].1["status"], "failed");

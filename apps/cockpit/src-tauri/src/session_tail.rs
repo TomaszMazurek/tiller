@@ -1,5 +1,5 @@
 //! Session timeline: tails the pi session JSONL of a hosted sandbox and
-//! republishes its entries as `session.entry` notifications.
+//! republishes its entries as `session:entry` notifications.
 //!
 //! Brief §5 rule 2: the cockpit does not render its own agent chat — the
 //! timeline is a *derived* status/event view built from observing the
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::term_host::{EventSink, SessionId};
 
 /// Tauri event carrying one derived timeline entry: `{session_id, entry}`.
-pub const EVENT_ENTRY: &str = "session.entry";
+pub const EVENT_ENTRY: &str = "session:entry";
 
 /// Tailer poll cadence (see the module docs for why polling).
 const TAIL_POLL: Duration = Duration::from_millis(250);
@@ -361,7 +361,7 @@ impl TailerState {
     }
 
     /// One poll cycle: (re-)discover the session file, read new bytes,
-    /// emit one `session.entry` per parsed entry. Returns how many
+    /// emit one `session:entry` per parsed entry. Returns how many
     /// entries were emitted. Never panics on a missing/vanished file —
     /// a vanished file just resets tracking for the next cycle.
     pub(crate) fn poll_once(&mut self, session_id: SessionId, sink: &dyn EventSink) -> usize {

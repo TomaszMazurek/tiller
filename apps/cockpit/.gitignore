@@ -1,0 +1,3 @@
+# Playwright artifacts (CDP smoke against the release exe)
+test-results/
+playwright-report/

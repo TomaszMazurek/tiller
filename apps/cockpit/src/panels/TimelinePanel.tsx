@@ -35,7 +35,7 @@ export interface TimelinePanelProps extends IDockviewPanelProps {
  * Timeline panel (brief §5 rule 2): a derived status/event view of what
  * the hosted agent is doing, observed from the session JSONL pi writes.
  * Thin by design — the state machine lives in `timeline.ts` (reducer) and
- * the backend (`session.observe` snapshot + `session.entry` stream).
+ * the backend (`session.observe` snapshot + `session:entry` stream).
  *
  * The observed session id arrives over `ActiveSessionContext`, not
  * props: dockview freezes the component function per panel, so a

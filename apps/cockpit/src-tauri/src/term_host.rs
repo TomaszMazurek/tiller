@@ -6,7 +6,7 @@
 //! across threads is off the table): it drains pending commands, then
 //! pumps one output poll — a 20 ms cadence that bounds both command latency
 //! and the jitter added to output delivery. Output chunks and the exit
-//! status reach the UI as `term.output` / `term.exit` notifications through
+//! status reach the UI as `term:output` / `term:exit` notifications through
 //! the [`EventSink`] (the Tauri `AppHandle` in production, a recorder in
 //! tests).
 //!
@@ -14,8 +14,8 @@
 //!
 //! ```text
 //! UI (rpc term.*) ──cmd channel──► session actor ──PtySession──► PTY ─► pi
-//! PTY output ──PtySession pump──► actor recv_output ──EventSink──► term.output
-//! child exit ──PtySession reaper──► actor wait_exit ──EventSink──► term.exit
+//! PTY output ──PtySession pump──► actor recv_output ──EventSink──► term:output
+//! child exit ──PtySession reaper──► actor wait_exit ──EventSink──► term:exit
 //! ```
 //!
 //! Blocking semantics: `write` mirrors [`tiller_term::PtySession::write`]
@@ -40,10 +40,10 @@ use crate::sandbox;
 use crate::session_tail::{self, TailerHandle, TimelineEntry};
 
 /// Tauri event carrying one output chunk: `{session_id, data}` (base64).
-pub const EVENT_OUTPUT: &str = "term.output";
+pub const EVENT_OUTPUT: &str = "term:output";
 /// Tauri event carrying the session's exit: `{session_id, exit_code,
 /// signal?, success, dsr_responses_sent}`.
-pub const EVENT_EXIT: &str = "term.exit";
+pub const EVENT_EXIT: &str = "term:exit";
 
 /// Output poll cadence of a session actor (see the module docs).
 const OUTPUT_POLL: Duration = Duration::from_millis(20);
@@ -329,7 +329,7 @@ impl SessionManager {
             },
         );
         // Pi sessions are observed from spawn: the tailer turns the
-        // session JSONL pi writes in its sandbox into `session.entry`
+        // session JSONL pi writes in its sandbox into `session:entry`
         // notifications (see [`crate::session_tail`]). Auto-start rather
         // than observe-on-demand: zero UI coupling, the timeline works
         // from the first second, and the tailer simply waits out pi's
@@ -409,14 +409,14 @@ impl SessionManager {
 }
 
 /// The session actor: owns the session, drains commands between output
-/// polls, forwards output as `term.output`, and after the stream closes
-/// publishes `term.exit` (with the final DSR counter) and removes the
+/// polls, forwards output as `term:output`, and after the stream closes
+/// publishes `term:exit` (with the final DSR counter) and removes the
 /// session from the manager. When the manager goes away (app shutdown,
 /// or the panel that owned it) the hosted program — owned by the app —
 /// is taken down with it: the actor holds the manager only as a `Weak`,
 /// so the last manager drop both disconnects the command channel and
 /// fails the liveness upgrade, and either way the actor kills the
-/// session, still reports `term.exit` through its own sink copy, and
+/// session, still reports `term:exit` through its own sink copy, and
 /// deletes the session's pi sandbox if it had one.
 fn run_session(
     manager: Weak<ManagerInner>,
@@ -465,8 +465,8 @@ fn run_session(
     let dsr_responses_sent = session.dsr_responses_sent();
     // Wind the observation tailer down before announcing the exit: the
     // join guarantees the tailer thread never outlives its session
-    // actor, and every `session.entry` of this session precedes its
-    // `term.exit` on the wire (its final drain runs while stopped).
+    // actor, and every `session:entry` of this session precedes its
+    // `term:exit` on the wire (its final drain runs while stopped).
     if let Some((stop, handle)) = tailer {
         stop.store(true, Ordering::Relaxed);
         let _ = handle.join();
@@ -1107,7 +1107,7 @@ mod tests {
 
         write_session_file(&sandbox, "--slug--", &format!("{SESSION_USER_LINE}\n"));
 
-        // The auto-started tailer streams it as `session.entry`.
+        // The auto-started tailer streams it as `session:entry`.
         let (_, payload) =
             sink.wait_for(WAIT, |event, _| event == crate::session_tail::EVENT_ENTRY);
         assert_eq!(payload["session_id"], id);
@@ -1158,7 +1158,7 @@ mod tests {
         write_session_file(&sandbox, "flat", &format!("{SESSION_USER_LINE}\n"));
         sink.wait_for(WAIT, |event, _| event == crate::session_tail::EVENT_ENTRY);
 
-        // Session end: every session.entry precedes term.exit (the actor
+        // Session end: every session:entry precedes term:exit (the actor
         // joins the tailer before announcing the exit), and the sandbox
         // cleanup — which runs after that join — completing proves the
         // tailer thread was already wound down (a stalled join would

@@ -23,13 +23,13 @@ export interface TermSpawnParams {
   env?: Record<string, string>;
 }
 
-/** `term.output` notification payload: one base64-encoded output chunk. */
+/** `term:output` notification payload: one base64-encoded output chunk. */
 export interface TermOutputEvent {
   session_id: SessionId;
   data: string;
 }
 
-/** `term.exit` notification payload. */
+/** `term:exit` notification payload. */
 export interface TermExitEvent {
   session_id: SessionId;
   exit_code: number;
@@ -96,7 +96,7 @@ export async function termStats(
   return { dsr_responses_sent: result.dsr_responses_sent };
 }
 
-/** Decode one `term.output` payload into the terminal (pure mapping). */
+/** Decode one `term:output` payload into the terminal (pure mapping). */
 export function applyTermOutput(target: ByteWriter, event: TermOutputEvent): void {
   target.write(base64ToBytes(event.data));
 }
@@ -111,12 +111,12 @@ export function subscribeTermOutput(
   handler: (event: TermOutputEvent) => void,
   listenFn: TermListenFn = listen,
 ): Promise<UnlistenFn> {
-  return listenFn<TermOutputEvent>('term.output', (event) => handler(event.payload));
+  return listenFn<TermOutputEvent>('term:output', (event) => handler(event.payload));
 }
 
 export function subscribeTermExit(
   handler: (event: TermExitEvent) => void,
   listenFn: TermListenFn = listen,
 ): Promise<UnlistenFn> {
-  return listenFn<TermExitEvent>('term.exit', (event) => handler(event.payload));
+  return listenFn<TermExitEvent>('term:exit', (event) => handler(event.payload));
 }

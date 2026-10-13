@@ -109,7 +109,7 @@ pub struct GatesStarted {
     /// Gate ids that were started, in run order.
     pub started: Vec<String>,
     /// The candidate (task-branch tip) the gates run against; results
-    /// land as `task.gate` events and then in `task.gates` evidence.
+    /// land as `task:gate` events and then in `task.gates` evidence.
     pub candidate: String,
 }
 
@@ -376,7 +376,7 @@ impl TaskHost {
     /// the evidence will be bound to.
     ///
     /// The run itself is **async**: a worker thread executes the gates
-    /// sequentially (check → test), emits `task.gate` events on every
+    /// sequentially (check → test), emits `task:gate` events on every
     /// status change, and on completion writes the evidence via
     /// [`TaskWorkspace::set_evidence`] — under the repo lock again, so a
     /// concurrent checkpoint can interleave safely: the record is bound to

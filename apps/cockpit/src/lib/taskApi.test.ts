@@ -139,7 +139,7 @@ describe('taskMerge / taskRebase / taskReset / taskDiscard', () => {
   });
 });
 
-describe('taskRunGates / taskGates / task.gate events', () => {
+describe('taskRunGates / taskGates / task:gate events', () => {
   it('run_gates sends repo+task and validates the started shape', async () => {
     const { invokeFn, calls } = invokeAnswering({
       'task.run_gates': { started: ['cargo-check', 'cargo-test'], candidate: 'c1' },
@@ -162,10 +162,10 @@ describe('taskRunGates / taskGates / task.gate events', () => {
     expect(await taskGates('r', 't', invokeFn)).toEqual(info);
   });
 
-  it('subscribeTaskGate listens on task.gate and taskGateMatches filters by repo+task', async () => {
+  it('subscribeTaskGate listens on task:gate and taskGateMatches filters by repo+task', async () => {
     const seen: unknown[] = [];
     const listenFn = vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
-      expect(event).toBe('task.gate');
+      expect(event).toBe('task:gate');
       handler({ payload: { task_id: 't1', candidate: 'c1', id: 'cargo-check', label: 'cargo check', status: 'running' } });
       return () => undefined;
     });

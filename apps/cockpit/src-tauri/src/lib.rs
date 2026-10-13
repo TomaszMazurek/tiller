@@ -64,10 +64,13 @@ struct AppEventSink {
 impl EventSink for AppEventSink {
     fn emit(&self, event: &str, payload: serde_json::Value) {
         use tauri::Emitter;
-        // A failed emit means no webview listener matched (window closing):
-        // the session actor must keep draining either way, so the error is
-        // swallowed.
-        let _ = self.app.emit(event, payload);
+        // An emit failure is not fatal — usually no webview listener
+        // matched (e.g. the window is closing) — but it must not vanish
+        // silently: an invalid event name is exactly the bug class this
+        // slice caught, and only a loud log surfaces it.
+        if let Err(error) = self.app.emit(event, payload) {
+            eprintln!("cockpit: emit '{event}' failed: {error}");
+        }
     }
 }
 
