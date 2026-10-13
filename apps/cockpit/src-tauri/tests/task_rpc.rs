@@ -6,9 +6,13 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
-use cockpit_lib::{CockpitDispatcher, EventSink, PtySessionFactory, SessionManager, TaskHost};
+use cockpit_lib::{
+    CockpitDispatcher, CommandRunner, EventSink, ProcessOutcome, ProcessRunner, PtySessionFactory,
+    SessionManager, TaskHost,
+};
 use git2::Repository;
 use tiller_rpc::{Dispatcher, RequestId, RpcRequest, INVALID_PARAMS, METHOD_NOT_FOUND};
 
@@ -26,6 +30,65 @@ impl EventSink for NoopSink {
     fn emit(&self, _event: &str, _payload: serde_json::Value) {}
 }
 
+/// Records every notification (gate events) for assertions.
+#[derive(Default)]
+struct RecordingSink {
+    events: Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+impl EventSink for RecordingSink {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        self.events
+            .lock()
+            .unwrap()
+            .push((event.to_string(), payload));
+    }
+}
+
+/// Poll `pred` until it holds or the deadline passes (async gate worker
+/// threads finish on their own schedule; bounded waiting, no sleeps).
+fn wait_until(timeout_ms: u64, mut pred: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if pred() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// A scripted [`CommandRunner`]: every invocation announces itself on
+/// `arrivals` and then parks on `release` until the test lets it proceed,
+/// answering with the queued outcome. That makes the async worker's
+/// progress test-drivable: the mid-run `running` state is observable.
+struct ScriptedRunner {
+    outcomes: Mutex<std::collections::VecDeque<ProcessOutcome>>,
+    arrivals: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CommandRunner for ScriptedRunner {
+    fn run(
+        &self,
+        _program: &str,
+        _args: &[&str],
+        _cwd: &std::path::Path,
+        _env: &[(String, String)],
+        _timeout: std::time::Duration,
+    ) -> ProcessOutcome {
+        self.arrivals.send(()).expect("test listens");
+        self.release.lock().unwrap().recv().expect("test releases");
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("an outcome is queued for every gate")
+    }
+}
+
 fn dispatcher() -> CockpitDispatcher {
     let sandbox_root = std::env::temp_dir().join(format!("tiller-taskrpc-{}", std::process::id()));
     let manager = SessionManager::new(
@@ -33,7 +96,36 @@ fn dispatcher() -> CockpitDispatcher {
         sandbox_root,
         Arc::new(PtySessionFactory),
     );
-    CockpitDispatcher::new(manager, TaskHost::new())
+    CockpitDispatcher::new(
+        manager,
+        Arc::new(TaskHost::new(Arc::new(NoopSink), Arc::new(ProcessRunner))),
+    )
+}
+
+fn gates_dispatcher(
+    outcomes: Vec<ProcessOutcome>,
+) -> (
+    CockpitDispatcher,
+    Arc<RecordingSink>,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let sink = Arc::new(RecordingSink::default());
+    let (arrive_tx, arrive_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let runner = Arc::new(ScriptedRunner {
+        outcomes: Mutex::new(outcomes.into()),
+        arrivals: arrive_tx,
+        release: Mutex::new(release_rx),
+    });
+    let sandbox_root = std::env::temp_dir().join(format!("tiller-taskrpc-{}", std::process::id()));
+    let manager = SessionManager::new(sink.clone(), sandbox_root, Arc::new(PtySessionFactory));
+    (
+        CockpitDispatcher::new(manager, Arc::new(TaskHost::new(sink.clone(), runner))),
+        sink,
+        arrive_rx,
+        release_tx,
+    )
 }
 
 fn call(d: &CockpitDispatcher, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -426,4 +518,499 @@ fn diff_is_a_pure_object_read_available_while_worktree_dirty() {
         .map(|f| f["patch"].as_str().unwrap())
         .collect::<String>();
     assert!(!patches.contains("uncommitted"), "{patches}");
+}
+
+// ------------------------------------------------------------ gates (P7)
+
+fn outcome(status: &str, exit_code: Option<i32>, output: &str) -> ProcessOutcome {
+    use cockpit_lib::GateStatus;
+    ProcessOutcome {
+        status: match status {
+            "passed" => GateStatus::Passed,
+            "failed" => GateStatus::Failed,
+            _ => GateStatus::Timeout,
+        },
+        exit_code,
+        duration_ms: 7,
+        output: output.to_owned(),
+    }
+}
+
+fn gate_events(sink: &RecordingSink) -> Vec<(String, serde_json::Value)> {
+    sink.events.lock().unwrap().clone()
+}
+
+/// The whole async flow: started answer, `task.gate` events (running →
+/// final per gate), the running flag mid-run, and the finished evidence
+/// bound to the candidate with log tails capped.
+#[test]
+fn run_gates_full_flow_events_running_flag_and_evidence() {
+    let long_output = "x".repeat(64 * 1024);
+    let (d, sink, arrivals, release) = gates_dispatcher(vec![
+        outcome("passed", Some(0), "checking...\n"),
+        outcome(
+            "failed",
+            Some(101),
+            &format!("{long_output}\ntests fail at the end"),
+        ),
+    ]);
+    let repo = init_repo();
+    let commit = task_with_checkpoint(&d, &repo, "gates-1");
+
+    // default gates = both presets, in run order
+    let started = call(&d, "task.run_gates", task_param(&repo, "gates-1"));
+    assert_eq!(
+        started["started"],
+        serde_json::json!(["cargo-check", "cargo-test"])
+    );
+    assert_eq!(started["candidate"], commit);
+
+    // mid-run: the first gate is parked on the script → running=true,
+    // no evidence yet
+    assert!(arrivals
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .is_ok());
+    let gates = call(&d, "task.gates", task_param(&repo, "gates-1"));
+    assert_eq!(gates["running"], true);
+    assert!(gates.get("evidence").is_none());
+
+    // running event for gate 1 precedes its final answer
+    assert!(wait_until(2000, || !gate_events(&sink).is_empty()));
+    let (_, payload) = gate_events(&sink)[0].clone();
+    assert_eq!(payload["task_id"], "gates-1");
+    assert_eq!(payload["candidate"], commit);
+    assert_eq!(payload["id"], "cargo-check");
+    assert_eq!(payload["status"], "running");
+    assert!(payload.get("duration_ms").is_none());
+
+    // release gate 1; gate 2 arrives parked — and its `running` event is
+    // already out (events precede the runner call by design)
+    release.send(()).unwrap();
+    assert!(arrivals
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .is_ok());
+    let events = gate_events(&sink);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1].1["id"], "cargo-check");
+    assert_eq!(events[1].1["status"], "passed");
+    assert_eq!(events[1].1["duration_ms"], 7);
+    assert_eq!(events[2].1["id"], "cargo-test");
+    assert_eq!(events[2].1["status"], "running");
+
+    // second start while a run is live → stable app error
+    let again = call_err(&d, "task.run_gates", task_param(&repo, "gates-1"));
+    assert_eq!(again.code, -32024);
+    assert_eq!(again.data.unwrap()["code"], "gates_already_running");
+
+    release.send(()).unwrap();
+    // evidence lands bound to the candidate, log tails capped
+    assert!(wait_until(5000, || {
+        call(&d, "task.gates", task_param(&repo, "gates-1"))
+            .get("evidence")
+            .is_some()
+    }));
+    let gates = call(&d, "task.gates", task_param(&repo, "gates-1"));
+    assert_eq!(gates["running"], false);
+    assert_eq!(gates["candidate"], commit);
+    let evidence = &gates["evidence"];
+    assert_eq!(evidence["dirty_at_start"], false);
+    // A clean end (nothing changed during the run): no annotation
+    assert_eq!(evidence["dirty_at_end"], false);
+    assert!(evidence.get("dirty_paths").is_none());
+    assert!(evidence["finished_at"].is_u64());
+    assert_eq!(evidence["gates"][0]["id"], "cargo-check");
+    assert_eq!(evidence["gates"][0]["status"], "passed");
+    assert_eq!(evidence["gates"][0]["exit_code"], 0);
+    assert_eq!(evidence["gates"][1]["id"], "cargo-test");
+    assert_eq!(evidence["gates"][1]["status"], "failed");
+    assert_eq!(evidence["gates"][1]["exit_code"], 101);
+    let tail = evidence["gates"][1]["log_tail"].as_str().unwrap();
+    // the tail keeps the END: the closing marker survives, the 64 KiB of
+    // filler does not
+    assert!(tail.contains("tests fail at the end"), "{tail}");
+    assert!(tail.starts_with("… [output tail]"));
+    // the marker counts against the budget: marker + bytes ≤ 8 KiB total
+    // (P7 review MINOR-1)
+    assert!(
+        tail.len() <= 8 * 1024,
+        "log tail capped to 8 KiB including the marker: {}",
+        tail.len()
+    );
+
+    // all four events: running+final per gate, in order
+    let events = gate_events(&sink);
+    assert_eq!(events.len(), 4);
+    assert!(events.iter().all(|(name, _)| name == "task.gate"));
+    assert_eq!(events[2].1["id"], "cargo-test");
+    assert_eq!(events[2].1["status"], "running");
+    assert_eq!(events[3].1["status"], "failed");
+}
+
+/// A subset of gates runs only what was asked for.
+#[test]
+fn run_gates_accepts_a_subset_of_presets() {
+    let (d, _sink, arrivals, release) = gates_dispatcher(vec![outcome("passed", Some(0), "ok")]);
+    let repo = init_repo();
+    task_with_checkpoint(&d, &repo, "gates-sub");
+    let started = call(
+        &d,
+        "task.run_gates",
+        serde_json::json!({
+            "repo": repo.path.to_string_lossy(),
+            "task_id": "gates-sub",
+            "gates": ["cargo-test"],
+        }),
+    );
+    assert_eq!(started["started"], serde_json::json!(["cargo-test"]));
+    assert!(arrivals
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .is_ok());
+    release.send(()).unwrap();
+    assert!(wait_until(5000, || {
+        call(&d, "task.gates", task_param(&repo, "gates-sub"))
+            .get("evidence")
+            .is_some()
+    }));
+    let gates = call(&d, "task.gates", task_param(&repo, "gates-sub"));
+    assert_eq!(gates["evidence"]["gates"].as_array().unwrap().len(), 1);
+}
+
+/// Untracked files are dirt too (P7 review MAJOR-1): `cargo` would
+/// compile files that are not part of the candidate, so the start
+/// refuses them with the path in the error — checkpoint first.
+#[test]
+fn run_gates_refuses_untracked_files() {
+    let (d, _sink, _arrivals, _release) = gates_dispatcher(vec![]);
+    let repo = init_repo();
+    task_with_checkpoint(&d, &repo, "gates-untracked");
+
+    // a clean tracked tree but a new untracked file: still refused
+    let worktree = repo
+        .path
+        .join(".tiller")
+        .join("worktrees")
+        .join("gates-untracked");
+    fs::write(worktree.join("stray.rs"), "fn main() {}\n").unwrap();
+    let error = call_err(&d, "task.run_gates", task_param(&repo, "gates-untracked"));
+    assert_eq!(error.code, -32023);
+    let data = error.data.clone().unwrap();
+    assert_eq!(data["code"], "gates_dirty_worktree");
+    assert_eq!(data["paths"], serde_json::json!(["stray.rs"]));
+    assert!(error.message.contains("stray.rs"), "{error:?}");
+
+    // both kinds land in one refusal, tracked first
+    fs::write(worktree.join("a.txt"), "also modified\n").unwrap();
+    let error = call_err(&d, "task.run_gates", task_param(&repo, "gates-untracked"));
+    assert_eq!(
+        error.data.unwrap()["paths"],
+        serde_json::json!(["a.txt", "stray.rs"])
+    );
+}
+
+/// Review directive A.2: the worktree is re-checked right before the
+/// record is written; a run that ended dirty is **annotated**
+/// (`dirty_at_end` + `dirty_paths`), never discarded — incomplete proof,
+/// not a lost one. A clean run records `dirty_at_end: false`.
+#[test]
+fn run_gates_annotates_dirty_at_end_when_the_worktree_changed_during_the_run() {
+    let (d, _sink, arrivals, release) = gates_dispatcher(vec![
+        outcome("passed", Some(0), "ok"),
+        outcome("passed", Some(0), "ok"),
+    ]);
+    let repo = init_repo();
+    let commit = task_with_checkpoint(&d, &repo, "gates-dirty-end");
+    call(&d, "task.run_gates", task_param(&repo, "gates-dirty-end"));
+
+    // mid-run (first gate parked on the script): the operator edits the
+    // worktree — the run itself proceeds and passes
+    assert!(arrivals
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .is_ok());
+    let worktree = repo
+        .path
+        .join(".tiller")
+        .join("worktrees")
+        .join("gates-dirty-end");
+    fs::write(worktree.join("a.txt"), "changed mid-run\n").unwrap();
+    fs::write(worktree.join("late.txt"), "untracked mid-run\n").unwrap();
+    release.send(()).unwrap();
+    assert!(arrivals
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .is_ok());
+    release.send(()).unwrap();
+
+    assert!(wait_until(5000, || {
+        call(&d, "task.gates", task_param(&repo, "gates-dirty-end"))
+            .get("evidence")
+            .is_some()
+    }));
+    let gates = call(&d, "task.gates", task_param(&repo, "gates-dirty-end"));
+    assert_eq!(gates["candidate"], commit);
+    let evidence = &gates["evidence"];
+    assert_eq!(evidence["dirty_at_end"], true);
+    // tracked change and untracked file alike, both listed
+    assert_eq!(
+        evidence["dirty_paths"],
+        serde_json::json!(["a.txt", "late.txt"])
+    );
+    // the run itself is recorded — annotated, not discarded
+    assert_eq!(evidence["gates"][0]["status"], "passed");
+    assert_eq!(evidence["gates"][1]["status"], "passed");
+}
+
+/// Preconditions refuse: dirty worktree (checkpoint first, files listed),
+/// no checkpoints yet, unknown task.
+#[test]
+fn run_gates_refuses_dirty_worktree_and_tasks_without_checkpoints() {
+    let (d, _sink, _arrivals, _release) = gates_dispatcher(vec![]);
+    let repo = init_repo();
+    task_with_checkpoint(&d, &repo, "gates-dirty");
+
+    // dirty: tracked change without a checkpoint
+    let worktree = repo
+        .path
+        .join(".tiller")
+        .join("worktrees")
+        .join("gates-dirty");
+    fs::write(worktree.join("a.txt"), "uncommitted\n").unwrap();
+    let error = call_err(&d, "task.run_gates", task_param(&repo, "gates-dirty"));
+    assert_eq!(error.code, -32023);
+    let data = error.data.unwrap();
+    assert_eq!(data["code"], "gates_dirty_worktree");
+    assert_eq!(data["paths"], serde_json::json!(["a.txt"]));
+    assert!(error.message.contains("commit first"));
+
+    // no checkpoints: nothing reviewable to gate
+    call(&d, "task.create", task_param(&repo, "gates-empty"));
+    let error = call_err(&d, "task.run_gates", task_param(&repo, "gates-empty"));
+    assert_eq!(error.code, CODE_NO_CHECKPOINTS);
+
+    // unknown task
+    let error = call_err(&d, "task.run_gates", task_param(&repo, "ghost"));
+    assert_eq!(error.code, CODE_UNKNOWN_TASK);
+}
+
+/// After a new checkpoint the recorded evidence reads back stale — the
+/// wire says `{stale: true}` until gates run against the new candidate.
+#[test]
+fn gates_go_stale_when_the_candidate_moves() {
+    let (d, _sink, arrivals, release) = gates_dispatcher(vec![
+        outcome("passed", Some(0), "ok"),
+        outcome("passed", Some(0), "ok"),
+    ]);
+    let repo = init_repo();
+    let commit = task_with_checkpoint(&d, &repo, "gates-stale");
+    call(&d, "task.run_gates", task_param(&repo, "gates-stale"));
+    for _ in 0..2 {
+        assert!(arrivals
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok());
+        release.send(()).unwrap();
+    }
+    assert!(wait_until(5000, || {
+        call(&d, "task.gates", task_param(&repo, "gates-stale"))
+            .get("evidence")
+            .is_some()
+    }));
+
+    // a fresh checkpoint supersedes the candidate → stale
+    let worktree = repo
+        .path
+        .join(".tiller")
+        .join("worktrees")
+        .join("gates-stale");
+    fs::write(worktree.join("a.txt"), "moved on\n").unwrap();
+    let cp2 = call(
+        &d,
+        "task.checkpoint",
+        serde_json::json!({
+            "repo": repo.path.to_string_lossy(),
+            "task_id": "gates-stale",
+            "message": "post-gates",
+        }),
+    )["commit"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(cp2, commit);
+    let gates = call(&d, "task.gates", task_param(&repo, "gates-stale"));
+    assert_eq!(gates["stale"], true);
+    assert_eq!(gates["running"], false);
+    assert!(gates.get("evidence").is_none());
+
+    // and a task that never ran gates answers the bare `{running: false}`
+    task_with_checkpoint(&d, &repo, "gates-none");
+    let gates = call(&d, "task.gates", task_param(&repo, "gates-none"));
+    assert_eq!(gates, serde_json::json!({ "running": false }));
+}
+
+// ------------------------------------------- real process behavior (win)
+
+#[cfg(windows)]
+mod process_runner {
+    use super::*;
+    use cockpit_lib::ProcessRunner;
+
+    fn run(program: &str, args: &[&str], timeout: std::time::Duration) -> ProcessOutcome {
+        ProcessRunner.run(program, args, &std::env::temp_dir(), &[], timeout)
+    }
+
+    #[test]
+    fn exit_codes_map_to_passed_and_failed() {
+        let ok = run("cmd", &["/c", "exit 0"], std::time::Duration::from_secs(30));
+        assert_eq!(ok.status, cockpit_lib::GateStatus::Passed);
+        assert_eq!(ok.exit_code, Some(0));
+
+        let bad = run("cmd", &["/c", "exit 1"], std::time::Duration::from_secs(30));
+        assert_eq!(bad.status, cockpit_lib::GateStatus::Failed);
+        assert_eq!(bad.exit_code, Some(1));
+    }
+
+    #[test]
+    fn combined_output_is_captured() {
+        let out = run(
+            "cmd",
+            &[
+                "/c",
+                "echo gate-stdout-marker & echo gate-stderr-marker 1>&2",
+            ],
+            std::time::Duration::from_secs(30),
+        );
+        assert!(out.output.contains("gate-stdout-marker"), "{}", out.output);
+        assert!(out.output.contains("gate-stderr-marker"), "{}", out.output);
+    }
+
+    #[test]
+    fn timeout_kills_the_tree_and_reports_timeout_fast() {
+        // `ping -n 60` runs ~60 s; the 2 s budget must kill the tree and
+        // return promptly — the tree-kill smoke (no orphan check: pid
+        // reuse makes that flaky; promptness is the observable contract).
+        let started = std::time::Instant::now();
+        let out = run(
+            "cmd",
+            &["/c", "ping -n 60 127.0.0.1"],
+            std::time::Duration::from_secs(2),
+        );
+        assert_eq!(out.status, cockpit_lib::GateStatus::Timeout);
+        assert_eq!(out.exit_code, None);
+        assert!(out.output.contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn missing_program_reports_failed_with_the_reason() {
+        let out = run(
+            "definitely-not-a-program-tiller",
+            &[],
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(out.status, cockpit_lib::GateStatus::Failed);
+        assert!(out.output.contains("failed to spawn"));
+    }
+
+    #[test]
+    fn megabyte_of_output_is_tailed_not_hoarded() {
+        // ~1 MiB through the real pipes: memory is O(cap) while reading
+        // (not directly assertable — P7 review MAJOR-4), so the contract
+        // checked here is: prompt return, tail capped to the reader
+        // budget, ending preserved.
+        let started = std::time::Instant::now();
+        let out = run(
+            "powershell",
+            &["-NoProfile", "-Command", "$s = 'x' * 1048576; $s"],
+            std::time::Duration::from_secs(60),
+        );
+        assert_eq!(out.status, cockpit_lib::GateStatus::Passed);
+        assert!(out.output.ends_with('\n'), "{}", out.output);
+        assert!(out.output.len() <= 2 * 8192, "{}", out.output.len());
+        assert!(out.output.trim_end().chars().all(|c| c == 'x'));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+}
+
+// -------------------------------------------- real process behavior (unix)
+
+#[cfg(unix)]
+mod process_runner_unix {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn run(program: &str, args: &[&str], timeout: Duration) -> ProcessOutcome {
+        ProcessRunner.run(program, args, &std::env::temp_dir(), &[], timeout)
+    }
+
+    /// `/proc/<pid>/stat` exists and is not a zombie ⇔ the process is
+    /// alive (Linux; the CI target — macOS has no /proc and skips this
+    /// module's process probes).
+    #[cfg(target_os = "linux")]
+    fn process_alive(pid: i32) -> bool {
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        // after the "(comm)" field the state char follows; Z = zombie
+        // (dead, waiting to be reaped) counts as gone
+        match stat.rsplit(')').next() {
+            Some(rest) => !rest.trim_start().starts_with('Z'),
+            None => true,
+        }
+    }
+
+    /// A timeout must kill the whole process **group** (P7 review
+    /// MAJOR-3): the child runs as its own session leader (spawned with
+    /// `setsid`), so `killpg` reaches it *and* its grandchildren —
+    /// `cargo`'s rustc/test binaries — with one signal.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_kills_the_process_group_including_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        // `sh` waits on a backgrounded `sleep`: child + grandchild both
+        // alive until the group kill; the grandchild's pid lands in a
+        // file the test can read back.
+        let script = "sleep 300 & echo $! > grandchild.pid; wait";
+        let started = Instant::now();
+        let out = ProcessRunner.run(
+            "sh",
+            &["-c", script],
+            dir.path(),
+            &[],
+            Duration::from_secs(1),
+        );
+        assert_eq!(out.status, cockpit_lib::GateStatus::Timeout);
+        assert!(out.output.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(30));
+
+        let pid: i32 = fs::read_to_string(dir.path().join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while process_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {pid} survived the group kill"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn megabyte_of_output_is_tailed_not_hoarded() {
+        // `yes | head -c` produces exactly 1 MiB; see the Windows twin
+        // for the rationale (P7 review MAJOR-4).
+        let started = Instant::now();
+        let out = run(
+            "sh",
+            &[
+                "-c",
+                "yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | head -c 1048576",
+            ],
+            Duration::from_secs(60),
+        );
+        assert_eq!(out.status, cockpit_lib::GateStatus::Passed);
+        assert!(out.output.ends_with('\n'), "{}", out.output);
+        assert!(out.output.len() <= 2 * 8192, "{}", out.output.len());
+        assert!(out.output.trim_end().chars().all(|c| c == 'x'));
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
 }

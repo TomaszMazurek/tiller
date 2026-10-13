@@ -388,6 +388,99 @@ body {
   color: #8b8b94;
 }
 
+/* Gate status badges (P7): green = passed, red = failed/timeout,
+ * grey-blue pulse-free = running. */
+.review-badge--gate-passed {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.review-badge--gate-failed,
+.review-badge--gate-timeout {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.review-badge--gate-running {
+  color: #7dd3fc;
+  background: rgba(125, 211, 252, 0.1);
+}
+
+.review-panel__gates {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  max-height: 12rem;
+  margin: 0.25rem 0;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid #26262e;
+  border-radius: 4px;
+  overflow-y: auto;
+}
+
+.review-panel__gates-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.review-panel__gates-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b8b94;
+}
+
+.review-panel__gate-stale {
+  color: #fbbf24;
+  font-size: 0.75rem;
+}
+
+.review-panel__gate-dirty {
+  color: #f87171;
+  font-size: 0.75rem;
+}
+
+.review-panel__gate-warn {
+  color: #f87171;
+  font-size: 0.75rem;
+}
+
+.review-panel__gate-hint {
+  color: #8b8b94;
+  font-size: 0.75rem;
+}
+
+.review-panel__gate-list {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-panel__gate-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.125rem 0;
+}
+
+.review-panel__gate-duration {
+  color: #8b8b94;
+  font-size: 0.75rem;
+}
+
+.review-panel__gate-log pre {
+  margin: 0.25rem 0 0;
+  padding: 0.375rem;
+  max-height: 8rem;
+  overflow: auto;
+  background: #131318;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .review-panel__hint {
   margin: 0.5rem;
   color: #8b8b94;

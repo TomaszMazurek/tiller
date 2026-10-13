@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  subscribeTaskGate,
   taskApprove,
   taskCheckpoint,
   taskCreate,
   taskDiff,
   taskDiscard,
+  taskGates,
   taskList,
   taskMerge,
   taskRebase,
   taskReset,
+  taskRunGates,
   taskStatus,
+  taskGateMatches,
 } from './taskApi';
 import type { RpcResponse } from './rpcClient';
 
@@ -127,5 +131,49 @@ describe('taskMerge / taskRebase / taskReset / taskDiscard', () => {
 
     const bad = invokeAnswering({ 'task.rebase': { ok: true } }).invokeFn;
     await expect(taskRebase('r', 't', bad)).rejects.toThrow('new_tip');
+  });
+});
+
+describe('taskRunGates / taskGates / task.gate events', () => {
+  it('run_gates sends repo+task and validates the started shape', async () => {
+    const { invokeFn, calls } = invokeAnswering({
+      'task.run_gates': { started: ['cargo-check', 'cargo-test'], candidate: 'c1' },
+    });
+    const started = await taskRunGates('r', 't', invokeFn);
+    expect(started).toEqual({ started: ['cargo-check', 'cargo-test'], candidate: 'c1' });
+    expect(sentParams(calls)).toEqual([{ repo: 'r', task_id: 't' }]);
+
+    const bad = invokeAnswering({ 'task.run_gates': { candidate: 'c1' } }).invokeFn;
+    await expect(taskRunGates('r', 't', bad)).rejects.toThrow('started');
+  });
+
+  it('gates passes the evidence view through', async () => {
+    const info = {
+      running: false,
+      candidate: 'c1',
+      evidence: { gates: [{ id: 'cargo-check', label: 'cargo check', status: 'passed', duration_ms: 3 }], dirty_at_start: false, finished_at: 9 },
+    };
+    const { invokeFn } = invokeAnswering({ 'task.gates': info });
+    expect(await taskGates('r', 't', invokeFn)).toEqual(info);
+  });
+
+  it('subscribeTaskGate listens on task.gate and taskGateMatches filters by repo+task', async () => {
+    const seen: unknown[] = [];
+    const listenFn = vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
+      expect(event).toBe('task.gate');
+      handler({ payload: { task_id: 't1', candidate: 'c1', id: 'cargo-check', label: 'cargo check', status: 'running' } });
+      return () => undefined;
+    });
+    const unlisten = await subscribeTaskGate((event) => seen.push(event), listenFn as never);
+    expect(unlisten).toBeTypeOf('function');
+    expect(seen).toHaveLength(1);
+
+    const base = { repo: 'r', task_id: 't1', candidate: 'c1', id: 'g', label: 'g', status: 'passed' as const };
+    expect(taskGateMatches(base, 'r', 't1')).toBe(true);
+    expect(taskGateMatches({ ...base, repo: 'other' }, 'r', 't1')).toBe(false);
+    expect(taskGateMatches({ ...base, task_id: 't2' }, 'r', 't1')).toBe(false);
+    // a payload without repo (defensive) still matches its task
+    const { repo: _drop, ...noRepo } = base;
+    expect(taskGateMatches(noRepo, 'r', 't1')).toBe(true);
   });
 });

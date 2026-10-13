@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RpcClientError } from '../lib/rpcClient';
 import { ReviewPanel, type ReviewDeps } from './ReviewPanel';
 import type { CandidateDiff, MergeOutcome, TaskStatus, TaskSummary } from '../lib/taskApi';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 function task(id: string): TaskSummary {
   return { task_id: id, target_branch: 'master', base: 'aaaaaaa0', tip: '12345670' };
@@ -63,6 +64,9 @@ function fakeDeps(overrides: Partial<ReviewDeps> = {}) {
     rebase: vi.fn(async () => ({ ok: true, new_tip: '999aaa' })),
     reset: vi.fn(async () => undefined),
     discard: vi.fn(async () => undefined),
+    gates: vi.fn(async () => ({})),
+    runGates: vi.fn(async () => ({ started: ['cargo-check', 'cargo-test'], candidate: '1234567890abcdef' })),
+    listenGate: vi.fn(async () => (() => undefined) as UnlistenFn),
     ...overrides,
   };
   return deps;
@@ -357,5 +361,228 @@ describe('ReviewPanel', () => {
     loadRepo(deps);
     expect(await screen.findByTestId('review-error')).toBeDefined();
     expect(screen.getByTestId('review-error').textContent).toContain('[unknown_task]');
+  });
+});
+
+// ------------------------------------------------------------- gates (P7)
+
+import type { GatesInfo, GatesStarted, TaskGateEvent } from '../lib/taskApi';
+
+function gatesEvidence(
+  status: 'passed' | 'failed' | 'timeout',
+  logTail = '',
+  dirtyAtEnd = false,
+): GatesInfo {
+  return {
+    running: false,
+    candidate: '1234567890abcdef',
+    evidence: {
+      gates: [
+        { id: 'cargo-check', label: 'cargo check', status: 'passed', duration_ms: 1200 },
+        { id: 'cargo-test', label: 'cargo test', status, exit_code: 101, duration_ms: 3400, log_tail: logTail },
+      ],
+      dirty_at_start: false,
+      ...(dirtyAtEnd ? { dirty_at_end: true, dirty_paths: ['a.txt'] } : {}),
+      finished_at: 42,
+    },
+  };
+}
+
+/** Deps whose listenGate captures the handler so tests can push events. */
+function gateDeps(
+  overrides: Partial<ReviewDeps> = {},
+  gatesAnswer: () => Promise<GatesInfo> = async () => ({}),
+) {
+  let handler: ((event: TaskGateEvent) => void) | null = null;
+  const deps = fakeDeps({
+    gates: vi.fn(gatesAnswer),
+    runGates: vi.fn(async (): Promise<GatesStarted> => ({
+      started: ['cargo-check', 'cargo-test'],
+      candidate: '1234567890abcdef',
+    })),
+    listenGate: vi.fn(async (h: (event: TaskGateEvent) => void) => {
+      handler = h;
+      return (() => undefined) as UnlistenFn;
+    }),
+    ...overrides,
+  });
+  return {
+    deps,
+    emit: (event: TaskGateEvent) => handler!(event),
+  };
+}
+
+describe('ReviewPanel gates', () => {
+  afterEach(() => cleanup());
+
+  it('Run Gates → live badges from task.gate events → settled badges', async () => {
+    const { deps, emit } = gateDeps();
+    loadRepo(deps);
+    const button = await screen.findByTestId('review-run-gates');
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(deps.runGates).toHaveBeenCalledWith('C:/repo', 'fix-1');
+    });
+    // started: both entries running
+    expect((await screen.findAllByTestId('review-gate-badge')).map((el) => el.textContent)).toEqual([
+      'running',
+      'running',
+    ]);
+    // foreign task events are filtered out by the listener helper
+    emit({ task_id: 'fix-2', candidate: 'x', id: 'cargo-check', label: 'cargo check', status: 'passed' });
+    emit({ repo: 'other', task_id: 'fix-1', candidate: 'x', id: 'cargo-check', label: 'cargo check', status: 'passed' });
+    expect(screen.getAllByTestId('review-gate-badge').every((el) => el.textContent === 'running')).toBe(true);
+
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-check', label: 'cargo check', status: 'passed', duration_ms: 1200 });
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-test', label: 'cargo test', status: 'failed', duration_ms: 3400 });
+    await waitFor(() => {
+      expect(screen.getAllByTestId('review-gate-badge').map((el) => el.textContent)).toEqual(['passed', 'failed']);
+    });
+    expect(screen.getByText('1.2s')).toBeDefined();
+    expect(screen.getByText('3.4s')).toBeDefined();
+  });
+
+  it('evidence log tails render in an expandable details block', async () => {
+    const { deps } = gateDeps({}, async () => gatesEvidence('failed', 'error[E0308]: mismatched types'));
+    loadRepo(deps);
+    const details = await screen.findByTestId('review-gate-log');
+    expect(details.textContent).toContain('log tail');
+    expect(details.querySelector('pre')?.textContent).toContain('error[E0308]');
+  });
+
+  it('a failed gate warns at merge: confirm lists the problem, decline stops the merge', async () => {
+    const { deps } = gateDeps({}, async () => gatesEvidence('failed'));
+    loadRepo(deps);
+    await screen.findByTestId('review-gate-warn');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(await screen.findByTestId('review-merge'));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(confirmSpy.mock.calls[0][0]).toContain('gate cargo test failed');
+    expect(deps.approve).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByTestId('review-merge'));
+    await waitFor(() => {
+      expect(deps.approve).toHaveBeenCalledWith('C:/repo', 'fix-1');
+    });
+  });
+
+  it('all-passed gates merge without any confirm', async () => {
+    const { deps } = gateDeps({}, async () => gatesEvidence('passed'));
+    loadRepo(deps);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await screen.findByTestId('review-gates');
+    fireEvent.click(screen.getByTestId('review-merge'));
+    await waitFor(() => {
+      expect(deps.approve).toHaveBeenCalledWith('C:/repo', 'fix-1');
+    });
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it('stale evidence shows the STALE marker and warns at merge', async () => {
+    // evidence bound to an older candidate → stale by candidate comparison
+    const staleInfo = async (): Promise<GatesInfo> => ({
+      running: false,
+      candidate: 'aaaabbbbccccdddd',
+      evidence: gatesEvidence('passed').evidence,
+    });
+    const { deps } = gateDeps({}, staleInfo);
+    loadRepo(deps);
+    expect(await screen.findByTestId('review-gate-stale')).toBeDefined();
+    expect(screen.getByTestId('review-gate-stale').textContent).toContain('re-run');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByTestId('review-merge'));
+    expect(confirmSpy.mock.calls[0][0]).toContain('stale');
+    expect(deps.approve).not.toHaveBeenCalled();
+  });
+
+  it('no evidence at all → subtle hint, never a warn; Run Gates disabled without checkpoints', async () => {
+    const { deps } = gateDeps();
+    loadRepo(deps);
+    expect(await screen.findByTestId('review-gate-hint')).toBeDefined();
+    expect(screen.queryByTestId('review-gate-warn')).toBeNull();
+    // a no-checkpoints task disables Run Gates
+    fireEvent.click(screen.getAllByTestId('review-task')[1]);
+    await waitFor(() => {
+      expect((screen.getByTestId('review-run-gates') as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
+
+  it('after the last event the recorded evidence is fetched (retrying while the backend still says running)', async () => {
+    // the queue load's own fetch first, then the post-run attempts:
+    // #1 lands before the record is written (running), #2 delivers it
+    const gates = vi
+      .fn()
+      .mockImplementationOnce(async () => ({}) as GatesInfo)
+      .mockImplementationOnce(async () => ({ running: true }) as GatesInfo)
+      .mockImplementationOnce(async () => gatesEvidence('failed', 'error[E0308]: boom'));
+    const { deps, emit } = gateDeps({ gates });
+    loadRepo(deps);
+    fireEvent.click(await screen.findByTestId('review-run-gates'));
+    // the whole run arrives via events (running:false in state after the
+    // last one — the fetch must not depend on it, P7 review MAJOR-2)
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-check', label: 'cargo check', status: 'running' });
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-check', label: 'cargo check', status: 'passed', duration_ms: 1200 });
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-test', label: 'cargo test', status: 'running' });
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-test', label: 'cargo test', status: 'failed', duration_ms: 3400 });
+    // the record's log tail renders — proof the evidence landed
+    const log = await screen.findByTestId('review-gate-log', {}, { timeout: 4000 });
+    expect(log.querySelector('pre')?.textContent).toContain('error[E0308]');
+    expect(screen.getAllByTestId('review-gate-badge').map((el) => el.textContent)).toEqual(['passed', 'failed']);
+    expect(gates.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('retry exhaustion keeps the event-derived entries and surfaces the lag (P7 review MAJOR-2)', async () => {
+    // the record is never written while the backend keeps saying running
+    const gates = vi.fn().mockImplementation(async () => ({ running: true }) as GatesInfo);
+    const { deps, emit } = gateDeps({ gates });
+    loadRepo(deps);
+    fireEvent.click(await screen.findByTestId('review-run-gates'));
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-check', label: 'cargo check', status: 'running' });
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-check', label: 'cargo check', status: 'passed', duration_ms: 900 });
+    // attempts: #1 (t≈250ms), #2 (≈500), #3 (≈750) — all `running:true`;
+    // the view must NOT be wiped by an empty record and the lag shows
+    const lag = await screen.findByTestId('review-gate-lag', {}, { timeout: 4000 });
+    expect(lag.textContent).toContain('evidence still recording');
+    expect(screen.getAllByTestId('review-gate-badge').map((el) => el.textContent)).toEqual(['passed']);
+    expect(gates.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('a run that beats its rpc answer stays finished — the late started answer is dropped', async () => {
+    // gates always answer with the finished record: whenever the
+    // post-run fetch happens, the view is already settled
+    const { deps, emit } = gateDeps({}, async () => gatesEvidence('failed', 'boom-tail'));
+    let release!: (value: GatesStarted) => void;
+    const started = new Promise<GatesStarted>((resolve) => {
+      release = resolve;
+    });
+    (deps.runGates as ReturnType<typeof vi.fn>).mockImplementation(() => started);
+    loadRepo(deps);
+    fireEvent.click(await screen.findByTestId('review-run-gates'));
+    // every event lands before the rpc answer resolves
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-check', label: 'cargo check', status: 'passed', duration_ms: 1200 });
+    emit({ repo: 'C:/repo', task_id: 'fix-1', candidate: '1234567890abcdef', id: 'cargo-test', label: 'cargo test', status: 'failed', duration_ms: 3400 });
+    await waitFor(() => {
+      expect(screen.getAllByTestId('review-gate-badge').map((el) => el.textContent)).toEqual(['passed', 'failed']);
+    });
+    // now the started answer arrives late — it must not resurrect running
+    release({ started: ['cargo-check', 'cargo-test'], candidate: '1234567890abcdef' });
+    await waitFor(() => {
+      expect(deps.runGates).toHaveBeenCalled();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getAllByTestId('review-gate-badge').map((el) => el.textContent)).toEqual(['passed', 'failed']);
+    expect((screen.getByTestId('review-run-gates') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('dirty_at_end evidence shows the annotation and warns at merge (A.2)', async () => {
+    const { deps } = gateDeps({}, async () => gatesEvidence('passed', '', true));
+    loadRepo(deps);
+    expect(await screen.findByTestId('review-gate-dirty')).toBeDefined();
+    expect(screen.getByTestId('review-gate-dirty').textContent).toContain('changed during gates');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByTestId('review-merge'));
+    expect(confirmSpy.mock.calls[0][0]).toContain('changed during gates');
+    expect(deps.approve).not.toHaveBeenCalled();
   });
 });

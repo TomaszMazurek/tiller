@@ -46,6 +46,9 @@ fn cfg_key_approval_candidate(task_id: &str) -> String {
 fn cfg_key_approval_at(task_id: &str) -> String {
     format!("tiller.worktree.{task_id}.approval.at")
 }
+fn cfg_key_evidence(task_id: &str) -> String {
+    format!("tiller.worktree.{task_id}.evidence")
+}
 
 fn now_unix_ms() -> u64 {
     SystemTime::now()
@@ -362,8 +365,8 @@ fn strip_checkpoint_trailer(message: &str) -> String {
 ///
 /// One task = one worktree (`.tiller/worktrees/<task_id>`) + one branch
 /// (`tiller/task-<task_id>`) + persisted metadata in the repo-local git
-/// config (`tiller.worktree.<task_id>.*`): the base commit and any recorded
-/// approval, so state survives reopen.
+/// config (`tiller.worktree.<task_id>.*`): the base commit, any recorded
+/// approval, and any verification evidence, so state survives reopen.
 ///
 /// Single-writer per worktree by contract (AGENTS.md); this type is not
 /// synchronised.
@@ -592,6 +595,7 @@ impl TaskWorkspace {
             cfg_key_target_branch(&task_id),
             cfg_key_approval_candidate(&task_id),
             cfg_key_approval_at(&task_id),
+            cfg_key_evidence(&task_id),
         ] {
             match cfg.remove(&key) {
                 Ok(()) => {}
@@ -1033,6 +1037,58 @@ impl TaskWorkspace {
         } else {
             ApprovalState::BaseMoved
         })
+    }
+
+    /// Persist verification evidence for `candidate` (P7: gate results).
+    /// The record is written to the repo-local config under
+    /// `tiller.worktree.<id>.evidence` as `{candidate, evidence}` JSON and is
+    /// **generic for the caller**: this library neither validates nor
+    /// interprets the payload — what counts as evidence belongs to the
+    /// profile (PROJECT_CORE §3), the storage mechanics to the core.
+    ///
+    /// Writing is always possible, even for a candidate that is no longer
+    /// the branch tip: the record is keyed by the oid it ran against, and
+    /// [`Self::evidence`] declares such a record stale on read.
+    pub fn set_evidence(
+        &self,
+        candidate: Oid,
+        evidence: serde_json::Value,
+    ) -> Result<(), TransactionError> {
+        let main = self.main_repo()?;
+        let record = serde_json::json!({
+            "candidate": candidate.to_string(),
+            "evidence": evidence,
+        });
+        set_config_str(&main, &cfg_key_evidence(&self.task_id), &record.to_string())
+    }
+
+    /// The stored evidence **iff it is fresh**: the recorded candidate must
+    /// be the current task-branch tip. `None` ⇔ no record at all, or the tip
+    /// moved since the record was written (stale by definition — a gate run
+    /// against an older candidate says nothing about the new one). A corrupt
+    /// record is treated as absent rather than fatal: evidence is advisory
+    /// bookkeeping, and refusing the whole workspace over a broken JSON
+    /// string would trade a cosmetic issue for a hard outage.
+    pub fn evidence(&self) -> Result<Option<(Oid, serde_json::Value)>, TransactionError> {
+        let Some(raw) = read_config_str(&self.main_repo()?, &cfg_key_evidence(&self.task_id))
+        else {
+            return Ok(None);
+        };
+        let record: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let candidate = record
+            .get("candidate")
+            .and_then(|v| v.as_str())
+            .and_then(|hex| Oid::from_str(hex).ok());
+        let (Some(candidate), Some(evidence)) = (candidate, record.get("evidence").cloned()) else {
+            return Ok(None);
+        };
+        if candidate != self.tip_commit()?.id() {
+            return Ok(None);
+        }
+        Ok(Some((candidate, evidence)))
     }
 
     /// Merge the approved candidate onto the **pinned target branch** (the

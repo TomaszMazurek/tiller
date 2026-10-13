@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tiller_git::TransactionError;
@@ -37,8 +38,9 @@ use tiller_rpc::{
     METHOD_NOT_FOUND,
 };
 
+use crate::gates::{gate_preset, GATE_PRESETS};
 use crate::session_tail::TimelineEntry;
-use crate::task_host::{TaskHost, TaskSummary};
+use crate::task_host::{GateStartError, GatesInfo, GatesStarted, TaskHost, TaskSummary};
 use crate::term_host::{base64_decode, SessionId, SessionManager, SpawnSpec, TermError};
 
 /// Application error: the session id is not (or no longer) live.
@@ -48,11 +50,11 @@ pub const SESSION_NOT_FOUND: i64 = -32001;
 pub struct CockpitDispatcher {
     core: CoreDispatcher,
     terms: SessionManager,
-    tasks: TaskHost,
+    tasks: Arc<TaskHost>,
 }
 
 impl CockpitDispatcher {
-    pub fn new(terms: SessionManager, tasks: TaskHost) -> Self {
+    pub fn new(terms: SessionManager, tasks: Arc<TaskHost>) -> Self {
         Self {
             core: CoreDispatcher,
             terms,
@@ -115,6 +117,14 @@ impl CockpitDispatcher {
     /// - `task.rebase {repo, task_id}` → `{ok, new_tip}`
     /// - `task.reset {repo, task_id}` → `{}`
     /// - `task.discard {repo, task_id}` → `{}`
+    /// - `task.run_gates {repo, task_id, gates?}` → `{started: [ids],
+    ///   candidate}` — **async**: the gates (default: both presets)
+    ///   run on a worker thread in the task worktree; per-gate progress
+    ///   arrives as `task.gate` events, the finished record via
+    ///   `task.gates`. Refuses a dirty worktree (checkpoint first) and a
+    ///   task without checkpoints.
+    /// - `task.gates {repo, task_id}` → `{running, candidate?, evidence?}`
+    ///   | `{running, stale: true}` | `{running}` — the evidence view.
     fn dispatch_task(&self, method: &str, req: RpcRequest) -> Result<RpcResponse, RpcError> {
         let id = req.id.clone();
         let answer = match method {
@@ -140,6 +150,10 @@ impl CockpitDispatcher {
             "discard" => self
                 .task_discard(req.params)
                 .map(|()| serde_json::json!({})),
+            "run_gates" => self
+                .task_run_gates(req.params)
+                .and_then(|v| to_json(method, v)),
+            "gates" => self.task_gates(req.params).and_then(|v| to_json(method, v)),
             other => {
                 return Err(RpcError::new(
                     METHOD_NOT_FOUND,
@@ -238,6 +252,48 @@ impl CockpitDispatcher {
         require_non_empty("task.discard", "repo", &params.repo)?;
         self.tasks
             .discard(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    /// `task.run_gates`: validate the gate list (default: every preset in
+    /// run order), then hand the async start to the task host. The answer
+    /// is immediate; results live in `task.gate` events + `task.gates`.
+    fn task_run_gates(&self, params: serde_json::Value) -> Result<GatesStarted, RpcError> {
+        let params: RunGatesParams = parse_params("task.run_gates", params)?;
+        require_non_empty("task.run_gates", "repo", &params.repo)?;
+        let known = GATE_PRESETS.iter().map(|p| p.id).collect::<Vec<_>>();
+        let gate_ids: Vec<String> = match params.gates {
+            None => known.iter().map(|id| id.to_string()).collect(),
+            Some(ids) => {
+                if ids.is_empty() {
+                    return Err(invalid_params(
+                        "task.run_gates",
+                        "`gates` must name at least one gate",
+                    ));
+                }
+                for id in &ids {
+                    if gate_preset(id).is_none() {
+                        return Err(invalid_params(
+                            "task.run_gates",
+                            &format!("unknown gate id {id:?}; known: {}", known.join(", ")),
+                        ));
+                    }
+                }
+                ids
+            }
+        };
+        let gate_ids: Vec<&str> = gate_ids.iter().map(String::as_str).collect();
+        self.tasks
+            .start_gates(&params.repo, &params.task_id, &gate_ids)
+            .map_err(gate_start_error)
+    }
+
+    /// `task.gates`: the evidence view (fresh / stale / none + running).
+    fn task_gates(&self, params: serde_json::Value) -> Result<GatesInfo, RpcError> {
+        let params: TaskRefParams = parse_params("task.gates", params)?;
+        require_non_empty("task.gates", "repo", &params.repo)?;
+        self.tasks
+            .gates(&params.repo, &params.task_id)
             .map_err(task_error)
     }
 
@@ -425,6 +481,39 @@ fn task_error(error: TransactionError) -> RpcError {
     error
 }
 
+/// Gate-start preconditions map to their own stable codes, continuing the
+/// `task.*` block (see [`task_error`]): a dirty worktree is not a git
+/// failure, it is "checkpoint first" — and the UI needs to tell a
+/// rejected double-start apart from both.
+fn gate_start_error(error: GateStartError) -> RpcError {
+    match error {
+        GateStartError::Git(inner) => task_error(inner),
+        GateStartError::Dirty { files } => {
+            let mut rpc = RpcError::new(
+                -32023,
+                format!(
+                    "task: gates need a clean worktree — commit first (Checkpoint); \
+                     uncommitted/untracked changes: {}",
+                    files.join(", ")
+                ),
+            );
+            rpc.data = Some(serde_json::json!({
+                "code": "gates_dirty_worktree",
+                "paths": files,
+            }));
+            rpc
+        }
+        GateStartError::AlreadyRunning => {
+            let mut rpc = RpcError::new(
+                -32024,
+                "task: a gate run is already active for this task".to_owned(),
+            );
+            rpc.data = Some(serde_json::json!({ "code": "gates_already_running" }));
+            rpc
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnParams {
@@ -512,6 +601,16 @@ struct DiffParams {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunGatesParams {
+    repo: String,
+    task_id: String,
+    /// Gate ids in run order; default: every preset.
+    #[serde(default)]
+    gates: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,7 +621,13 @@ mod tests {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory.clone());
         (
-            CockpitDispatcher::new(manager, crate::task_host::TaskHost::new()),
+            CockpitDispatcher::new(
+                manager,
+                std::sync::Arc::new(crate::task_host::TaskHost::new(
+                    std::sync::Arc::new(crate::term_host::test_util::NoopSink),
+                    std::sync::Arc::new(crate::gates::ProcessRunner),
+                )),
+            ),
             factory,
         )
     }
@@ -933,5 +1038,51 @@ mod tests {
         // A task host exists in the dispatcher (per-repo serialization is
         // part of the construction contract, see task_host.rs).
         let _: &TaskHost = &dispatcher.tasks;
+    }
+
+    #[test]
+    fn run_gates_validates_the_gate_list_before_starting_anything() {
+        let (dispatcher, _factory) = dispatcher();
+        // unknown id → INVALID_PARAMS, naming the id and the known ones
+        let error = dispatch_err(
+            &dispatcher,
+            "task.run_gates",
+            serde_json::json!({ "repo": "C:/not/here", "task_id": "t", "gates": ["cargo-check", "lint"] }),
+        );
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(error.message.contains("lint"));
+        assert!(error.message.contains("cargo-test"));
+        // empty list → INVALID_PARAMS (naming zero gates is a client bug)
+        let error = dispatch_err(
+            &dispatcher,
+            "task.run_gates",
+            serde_json::json!({ "repo": "C:/not/here", "task_id": "t", "gates": [] }),
+        );
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(error.message.contains("at least one"));
+        // unknown fields rejected like everywhere else
+        let error = dispatch_err(
+            &dispatcher,
+            "task.run_gates",
+            serde_json::json!({ "repo": "C:/not/here", "task_id": "t", "extra": 1 }),
+        );
+        assert_eq!(error.code, INVALID_PARAMS);
+        // a valid list reaches the host and fails on the real seam (no
+        // such repo) — never on validation: the error is a task-level
+        // code, not INVALID_PARAMS
+        let error = dispatch_err(
+            &dispatcher,
+            "task.run_gates",
+            serde_json::json!({ "repo": "C:/not/here", "task_id": "t", "gates": ["cargo-test"] }),
+        );
+        assert_ne!(error.code, INVALID_PARAMS, "{error:?}");
+        assert!(error.code <= -32010, "a task.* app code: {error:?}");
+        // gates view validates too
+        let error = dispatch_err(
+            &dispatcher,
+            "task.gates",
+            serde_json::json!({ "task_id": "t" }),
+        );
+        assert_eq!(error.code, INVALID_PARAMS);
     }
 }

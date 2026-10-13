@@ -113,7 +113,10 @@ fn dispatcher() -> (CockpitDispatcher, Arc<RecordingSink>) {
         Instant::now().elapsed().as_nanos()
     ));
     let manager = SessionManager::new(sink.clone(), sandbox_root, Arc::new(PtySessionFactory));
-    (CockpitDispatcher::new(manager, TaskHost::new()), sink)
+    // The task host is incidental here (PTY smoke); gates never run —
+    // the sink is shared, the runner is the real one, unused.
+    let tasks = TaskHost::new(sink.clone(), Arc::new(cockpit_lib::ProcessRunner));
+    (CockpitDispatcher::new(manager, Arc::new(tasks)), sink)
 }
 
 fn call(

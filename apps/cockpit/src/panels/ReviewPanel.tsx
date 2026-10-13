@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { RpcClientError } from '../lib/rpcClient';
 import {
@@ -7,6 +7,7 @@ import {
   changeTypeIcon,
   diffLineKind,
   initialReviewState,
+  mergeGateProblems,
   reviewReducer,
   selectedFileDiff,
   selectedStatus,
@@ -19,18 +20,26 @@ import {
   taskCreate,
   taskDiff,
   taskDiscard,
+  taskGates,
   taskList,
   taskMerge,
   taskRebase,
   taskReset,
+  taskRunGates,
   taskStatus,
   taskCheckpoint,
+  taskGateMatches,
+  subscribeTaskGate,
   type CandidateDiff,
+  type GatesInfo,
+  type GatesStarted,
   type MergeOutcome,
   type TaskCreated,
+  type TaskGateEvent,
   type TaskStatus,
   type TaskSummary,
 } from '../lib/taskApi';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 /** Injected seams (tests fake the tauri bridge; see taskApi for defaults). */
 export interface ReviewDeps {
@@ -44,6 +53,9 @@ export interface ReviewDeps {
   rebase(repo: string, taskId: string): Promise<{ ok: boolean; new_tip: string }>;
   reset(repo: string, taskId: string): Promise<void>;
   discard(repo: string, taskId: string): Promise<void>;
+  gates(repo: string, taskId: string): Promise<GatesInfo>;
+  runGates(repo: string, taskId: string): Promise<GatesStarted>;
+  listenGate(handler: (event: TaskGateEvent) => void): Promise<UnlistenFn>;
 }
 
 const defaultDeps: ReviewDeps = {
@@ -57,6 +69,9 @@ const defaultDeps: ReviewDeps = {
   rebase: taskRebase,
   reset: taskReset,
   discard: taskDiscard,
+  gates: taskGates,
+  runGates: taskRunGates,
+  listenGate: subscribeTaskGate,
 };
 
 /** Operator-facing rpc error: message plus the stable string code. */
@@ -166,6 +181,144 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
     [refresh],
   );
 
+  /** The selected task's current candidate (the authority the gates'
+   * staleness is derived from). */
+  const currentCandidate =
+    selectedTaskId !== null
+      ? (state.statuses[selectedTaskId]?.candidate?.candidate_commit ?? null)
+      : null;
+
+  /** Single gates load path, same triggers as the diff (selection change
+   * or a completed queue load). A no-checkpoints task has nothing to
+   * gate: clear instead of fetching into a guaranteed error. */
+  const gates = state.gates;
+  useEffect(() => {
+    if (repo === null || selectedTaskId === null) {
+      return;
+    }
+    if (phase === 'no_checkpoints') {
+      dispatch({ type: 'gatesLoaded', info: {}, currentCandidate });
+      return;
+    }
+    let cancelled = false;
+    deps
+      .gates(repo, selectedTaskId)
+      .then((info) => {
+        if (!cancelled) {
+          dispatch({ type: 'gatesLoaded', info, currentCandidate });
+        }
+      })
+      .catch(() => {
+        // gates are advisory bookkeeping: a failed fetch never blocks
+        // the review — it just leaves the previous view in place.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // currentCandidate flows through the action, not the fetch key
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo, selectedTaskId, diffEpoch, phase, deps]);
+
+  /** The run's every entry settled: fetch the recorded evidence — it
+   * lands after the last event (the backend flips `running` false once
+   * written), so retry briefly while it still says running (bounded,
+   * ~3 attempts; on give-up the event-derived entries stay and only the
+   * log tails are missing). Guarded by `awaitingEvidence` so a plain
+   * evidence load cannot loop on itself (P7 review MAJOR-2). */
+  useEffect(() => {
+    if (
+      !gates.awaitingEvidence ||
+      gates.entries.length === 0 ||
+      !gates.entries.every((entry) => entry.status !== 'running')
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const attempt = (retriesLeft: number) => {
+      if (cancelled || repo === null || selectedTaskId === null) return;
+      deps
+        .gates(repo, selectedTaskId)
+        .then((info) => {
+          if (cancelled) return;
+          if (info.running === true) {
+            if (retriesLeft > 0) {
+              timer = setTimeout(() => attempt(retriesLeft - 1), 250);
+              return;
+            }
+            // Retry exhausted while the backend still says `running`:
+            // dispatching this answer would wipe the event-derived
+            // entries (P7 review MAJOR-2). Keep them and surface the
+            // lag explicitly instead.
+            dispatch({ type: 'evidencePending' });
+            return;
+          }
+          dispatch({ type: 'gatesLoaded', info, currentCandidate });
+        })
+        .catch(() => undefined);
+    };
+    timer = setTimeout(() => attempt(2), 250);
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+    // gates is the loop's own state; refetch only when it changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gates, repo, selectedTaskId, deps]);
+
+  /** `task.gate` events for the selected task (repo+task filter; refs so
+   * the subscription is mounted once but always sees fresh ids). */
+  const repoRef = useRef(repo);
+  repoRef.current = repo;
+  const taskRef = useRef(selectedTaskId);
+  taskRef.current = selectedTaskId;
+  const candidateRef = useRef(currentCandidate);
+  candidateRef.current = currentCandidate;
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let cancelled = false;
+    void deps
+      .listenGate((event) => {
+        const currentRepo = repoRef.current;
+        const taskId = taskRef.current;
+        if (currentRepo === null || taskId === null) {
+          return;
+        }
+        if (!taskGateMatches(event, currentRepo, taskId)) {
+          return;
+        }
+        dispatch({ type: 'gateEvent', event, currentCandidate: candidateRef.current });
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [deps]);
+
+  /** Run Gates: async by contract — no busy flag, the entries go live via
+   * the started answer and then the `task.gate` events. */
+  const onRunGates = () => {
+    const currentRepo = state.repo;
+    const taskId = state.selectedTaskId;
+    if (currentRepo === null || taskId === null || gates.running) return;
+    void (async () => {
+      try {
+        const started = await deps.runGates(currentRepo, taskId);
+        dispatch({ type: 'gatesStarted', gates: started.started, candidate: started.candidate });
+      } catch (error) {
+        dispatch({ type: 'actionFailed', message: messageOf(error) });
+      }
+    })();
+  };
+
   const onLoad = () => {
     const repo = repoInput.trim();
     if (repo !== '') {
@@ -191,20 +344,30 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
   };
 
   const onApproveAndMerge = () => {
-    const repo = state.repo;
+    const currentRepo = state.repo;
     const taskId = state.selectedTaskId;
-    if (repo === null || taskId === null) return;
+    if (currentRepo === null || taskId === null) return;
+    // Gates warn (P7): confirm, never block — the operator owns the call.
+    const problems = mergeGateProblems(state.gates);
+    if (
+      problems.length > 0 &&
+      !confirm(
+        `Merge ${taskId} despite gate problems?\n\n- ${problems.join('\n- ')}\n\n(tiller will merge anyway after Confirm)`,
+      )
+    ) {
+      return;
+    }
     dispatch({ type: 'actionStarted' });
     void (async () => {
       try {
-        await deps.approve(repo, taskId);
-        const outcome = await deps.merge(repo, taskId);
-        dispatch({ type: 'mergeFinished', repo, taskId, outcome });
+        await deps.approve(currentRepo, taskId);
+        const outcome = await deps.merge(currentRepo, taskId);
+        dispatch({ type: 'mergeFinished', repo: currentRepo, taskId, outcome });
       } catch (error) {
         dispatch({ type: 'actionFailed', message: messageOf(error) });
         return;
       }
-      await refresh(repo);
+      await refresh(currentRepo);
     })();
   };
 
@@ -260,6 +423,8 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
   const boundMerge = boundMergeOutcome(state);
   const merged = boundMerge !== null && 'merged' in boundMerge;
   const busy = state.busy;
+  const gatesState = state.gates;
+  const gateProblems = mergeGateProblems(gatesState);
 
   return (
     <div className="review-panel">
@@ -393,6 +558,15 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
                 <button type="button" onClick={onApproveAndMerge} disabled={busy} data-testid="review-merge">
                   Approve &amp; Merge
                 </button>
+                {gateProblems.length > 0 ? (
+                  <span className="review-panel__gate-warn" data-testid="review-gate-warn">
+                    gates: {gateProblems.length} problem{gateProblems.length > 1 ? 's' : ''}
+                  </span>
+                ) : !gatesState.loaded && phase === 'candidate' ? (
+                  <span className="review-panel__gate-hint" data-testid="review-gate-hint">
+                    no gate evidence — consider Run Gates first
+                  </span>
+                ) : null}
                 <button type="button" onClick={onRebase} disabled={busy} data-testid="review-rebase">
                   Rebase
                 </button>
@@ -406,6 +580,66 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
                   <button type="button" onClick={onCleanup} disabled={busy} data-testid="review-cleanup">
                     Cleanup
                   </button>
+                )}
+              </div>
+
+              <div className="review-panel__gates" data-testid="review-gates">
+                <div className="review-panel__gates-head">
+                  <span className="review-panel__gates-title">Gates</span>
+                  <button
+                    type="button"
+                    onClick={onRunGates}
+                    disabled={gatesState.running || phase === 'no_checkpoints'}
+                    data-testid="review-run-gates"
+                  >
+                    Run Gates
+                  </button>
+                  {gatesState.stale && (
+                    <span className="review-panel__gate-stale" data-testid="review-gate-stale">
+                      STALE — re-run against the new candidate
+                    </span>
+                  )}
+                  {gatesState.dirtyAtEnd && (
+                    <span className="review-panel__gate-dirty" data-testid="review-gate-dirty">
+                      worktree changed during gates — re-run
+                    </span>
+                  )}
+                  {gatesState.evidenceLag && (
+                    <span
+                      className="review-panel__gate-dirty"
+                      data-testid="review-gate-lag"
+                    >
+                      evidence still recording — Refresh to load log tails
+                    </span>
+                  )}
+                </div>
+                {gatesState.entries.length === 0 ? (
+                  <p className="review-panel__hint">no gate results yet</p>
+                ) : (
+                  <ul className="review-panel__gate-list" data-testid="review-gate-list">
+                    {gatesState.entries.map((entry) => (
+                      <li key={entry.id}>
+                        <span
+                          className={`review-badge review-badge--gate-${entry.status}`}
+                          data-testid="review-gate-badge"
+                        >
+                          {entry.status}
+                        </span>
+                        <span className="review-panel__gate-label">{entry.label}</span>
+                        {entry.duration_ms !== undefined && (
+                          <span className="review-panel__gate-duration">
+                            {(entry.duration_ms / 1000).toFixed(1)}s
+                          </span>
+                        )}
+                        {entry.log_tail !== undefined && entry.log_tail !== '' && (
+                          <details className="review-panel__gate-log" data-testid="review-gate-log">
+                            <summary>log tail</summary>
+                            <pre>{entry.log_tail}</pre>
+                          </details>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
 

@@ -840,3 +840,86 @@ fn serde_types_round_trip_with_snake_case_hex_oids() {
         }
     ));
 }
+
+// ------------------------------------------------------- 7. evidence (P7)
+
+/// Evidence round-trips under the candidate it ran against, and survives
+/// reopen while the tip stays put.
+#[test]
+fn evidence_stores_and_reads_back_under_the_same_candidate() {
+    let main = init_main();
+    let (ws, cp) = task_with_checkpoint(&main, "gates-1");
+
+    assert_eq!(ws.evidence().unwrap(), None); // nothing recorded yet
+    ws.set_evidence(
+        cp,
+        serde_json::json!({"gates": [{"id": "cargo-check", "status": "passed"}]}),
+    )
+    .unwrap();
+
+    let (oid, evidence) = ws.evidence().unwrap().expect("fresh evidence");
+    assert_eq!(oid, cp);
+    assert_eq!(evidence["gates"][0]["id"], "cargo-check");
+    assert_eq!(evidence["gates"][0]["status"], "passed");
+
+    // reopen: the record is repo-config, so it outlives the handle
+    let reopened = TaskWorkspace::open(&main.path, "gates-1").unwrap();
+    let (oid, _) = reopened
+        .evidence()
+        .unwrap()
+        .expect("evidence survives reopen");
+    assert_eq!(oid, cp);
+}
+
+/// A new checkpoint moves the tip → the stored evidence is stale by
+/// definition and reads back as `None` (still settable, but never fresh).
+#[test]
+fn evidence_goes_stale_when_a_new_checkpoint_moves_the_tip() {
+    let main = init_main();
+    let (mut ws, cp) = task_with_checkpoint(&main, "gates-2");
+    ws.set_evidence(cp, serde_json::json!({"gates": []}))
+        .unwrap();
+    assert!(ws.evidence().unwrap().is_some());
+
+    write_file(&worktree_dir(&main.path, "gates-2"), "a.txt", "later\n");
+    let cp2 = ws.checkpoint("post-gates").unwrap();
+
+    assert_eq!(ws.evidence().unwrap(), None);
+    // Writing under the new candidate makes it fresh again; writing under
+    // the old one stays unreadable through `evidence()` — stale is a read
+    // property, the write side never validates the oid.
+    ws.set_evidence(cp, serde_json::json!({"gates": []}))
+        .unwrap();
+    assert_eq!(ws.evidence().unwrap(), None);
+    ws.set_evidence(cp2, serde_json::json!({"gates": []}))
+        .unwrap();
+    let (oid, _) = ws.evidence().unwrap().expect("fresh under new tip");
+    assert_eq!(oid, cp2);
+
+    // reopen does not revive the stale-alternating state: still fresh
+    let reopened = TaskWorkspace::open(&main.path, "gates-2").unwrap();
+    assert_eq!(reopened.evidence().unwrap().expect("fresh").0, cp2);
+}
+
+/// Evidence is generic storage: any JSON the profile calls evidence is
+/// stored verbatim, and `discard` removes the record with the task.
+#[test]
+fn evidence_is_opaque_and_discarded_with_the_task() {
+    let main = init_main();
+    let (ws, cp) = task_with_checkpoint(&main, "gates-3");
+    ws.set_evidence(
+        cp,
+        serde_json::json!({"anything": [1, 2, {"nested": true}]}),
+    )
+    .unwrap();
+    let (_, evidence) = ws.evidence().unwrap().expect("opaque evidence");
+    assert_eq!(evidence["anything"][2]["nested"], true);
+
+    ws.discard().unwrap();
+    let repo = main.repo();
+    assert!(repo
+        .config()
+        .unwrap()
+        .get_string("tiller.worktree.gates-3.evidence")
+        .is_err());
+}

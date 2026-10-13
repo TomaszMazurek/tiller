@@ -536,6 +536,14 @@ pub(crate) mod test_util {
     use std::sync::mpsc::channel;
     use std::time::Instant;
 
+    /// A sink that swallows everything: for construction-time use in tests
+    /// that never expect events (e.g. the task host in dispatcher tests).
+    pub(crate) struct NoopSink;
+
+    impl EventSink for NoopSink {
+        fn emit(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
     /// Records every notification for assertions.
     pub(crate) struct RecordingSink {
         pub events: Mutex<Vec<(String, serde_json::Value)>>,

@@ -2,6 +2,7 @@
 //! narrow JSON-RPC seam, plus the PTY session host behind `term.*`.
 
 mod dispatch;
+mod gates;
 mod sandbox;
 mod session_tail;
 mod task_host;
@@ -13,8 +14,15 @@ use tiller_rpc::{Dispatcher, RequestId, RpcError, RpcRequest, RpcResponse, INVAL
 
 // Re-exported for the integration tests and the `pi_smoke` example.
 pub use dispatch::{CockpitDispatcher, SESSION_NOT_FOUND};
+pub use gates::{
+    CommandRunner, GatePreset, GateResult, GateStatus, ProcessOutcome, ProcessRunner, GATE_PRESETS,
+    GATE_TIMEOUT, LOG_TAIL_BYTES,
+};
 pub use session_tail::{TimelineEntry, EVENT_ENTRY};
-pub use task_host::{TaskCreated, TaskHost, TaskPhase, TaskRebased, TaskStatusInfo, TaskSummary};
+pub use task_host::{
+    GateStartError, GatesInfo, GatesStarted, TaskCreated, TaskHost, TaskPhase, TaskRebased,
+    TaskStatusInfo, TaskSummary,
+};
 pub use term_host::{
     EventSink, PtySessionFactory, SessionId, SessionManager, SessionStats, SpawnSpec, TermError,
     TermExit, EVENT_EXIT, EVENT_OUTPUT,
@@ -75,8 +83,11 @@ pub fn run() {
             let sink = Arc::new(AppEventSink {
                 app: app.handle().clone(),
             });
-            let manager = SessionManager::new(sink, cache_dir, Arc::new(PtySessionFactory));
-            app.manage(Arc::new(CockpitDispatcher::new(manager, TaskHost::new())));
+            let manager = SessionManager::new(sink.clone(), cache_dir, Arc::new(PtySessionFactory));
+            // Gates share the app's event sink; the command seam is the
+            // real process runner (cargo in the task worktree, P7).
+            let tasks = Arc::new(TaskHost::new(sink, Arc::new(ProcessRunner)));
+            app.manage(Arc::new(CockpitDispatcher::new(manager, tasks)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![rpc])
@@ -87,7 +98,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term_host::test_util::{manager_with, FakeFactory};
+    use crate::term_host::test_util::{manager_with, FakeFactory, NoopSink};
     use serde_json::json;
     use tiller_rpc::CoreDispatcher;
 
@@ -95,7 +106,10 @@ mod tests {
     fn bridges_core_version_requests() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
+        let dispatcher = Arc::new(CockpitDispatcher::new(
+            manager,
+            Arc::new(TaskHost::new(Arc::new(NoopSink), Arc::new(ProcessRunner))),
+        ));
         let raw = dispatch_json(dispatcher.as_ref(), r#"{"id":1,"method":"core.version"}"#);
         assert_eq!(raw.error, None);
         // The bridge must forward the dispatcher's answer verbatim; the
@@ -115,7 +129,10 @@ mod tests {
     fn malformed_json_maps_to_invalid_params() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
+        let dispatcher = Arc::new(CockpitDispatcher::new(
+            manager,
+            Arc::new(TaskHost::new(Arc::new(NoopSink), Arc::new(ProcessRunner))),
+        ));
         let raw = dispatch_json(dispatcher.as_ref(), "not json at all");
         let error = raw.error.expect("error present");
         assert_eq!(error.code, INVALID_PARAMS);
@@ -126,7 +143,10 @@ mod tests {
     fn unknown_method_maps_to_method_not_found() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
+        let dispatcher = Arc::new(CockpitDispatcher::new(
+            manager,
+            Arc::new(TaskHost::new(Arc::new(NoopSink), Arc::new(ProcessRunner))),
+        ));
         let raw = dispatch_json(dispatcher.as_ref(), r#"{"id":"a","method":"nope"}"#);
         let error = raw.error.expect("error present");
         assert_eq!(error.code, tiller_rpc::METHOD_NOT_FOUND);
@@ -137,7 +157,10 @@ mod tests {
     fn bridges_term_methods_with_base64_payloads() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
+        let dispatcher = Arc::new(CockpitDispatcher::new(
+            manager,
+            Arc::new(TaskHost::new(Arc::new(NoopSink), Arc::new(ProcessRunner))),
+        ));
         let spawn = dispatch_json(
             dispatcher.as_ref(),
             r#"{"id":1,"method":"term.spawn","params":{"program":"fake","cwd":"C:/tmp"}}"#,
