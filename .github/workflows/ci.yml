@@ -23,9 +23,14 @@ jobs:
       # cfg(windows), so it only engages on the Windows leg; the kill-
       # escalation suite (tests/unix_kill.rs) is cfg(unix) and engages on the
       # Linux/macOS legs.
+      # tiller-git vendors libgit2, whose build needs cmake (preinstalled on
+      # windows/macos runners; explicit on Linux for robustness).
+      - name: Install cmake (tiller-git vendored libgit2)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --exclude cockpit -- -D warnings
-      - run: cargo test -p tiller-core -p tiller-rpc -p tiller-term
+      - run: cargo test -p tiller-core -p tiller-rpc -p tiller-term -p tiller-git
 
   rust-app-check:
     strategy:
@@ -40,11 +45,14 @@ jobs:
       # WebView2, so no extra setup is required there. pkg-config and
       # libdbus-1-dev: libdbus-sys (transitive via tauri/muda) probes
       # dbus-1 through pkg-config and needs the headers even for a check.
+      # cmake: tiller-git vendors libgit2 (workspace builds reach it even
+      # when only cockpit packages are requested, via lockfile-wide metadata
+      # and future workspace builds).
       - name: Install Tauri system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+          sudo apt-get install -y pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev cmake
       # Windows: full cockpit suite (unit + the cfg(windows) ConPTY
       # integration tests). Ubuntu: check + unit tests only — the ConPTY
       # suite is cfg(windows) and unix PTY coverage for the session host is
