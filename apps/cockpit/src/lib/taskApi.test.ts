@@ -34,12 +34,17 @@ function sentParams(calls: Array<{ command: string; args?: Record<string, unknow
 }
 
 describe('taskList', () => {
-  it('sends {repo} and unwraps the array', async () => {
-    const { invokeFn, calls } = invokeAnswering({
-      'task.list': [{ task_id: 'fix-1', target_branch: 'master', base: 'b', tip: 't' }],
-    });
+  it('sends {repo} and unwraps the array (wire shape mirrors TaskSummary)', async () => {
+    const entry = {
+      task_id: 'fix-1',
+      target_branch: 'master',
+      worktree_path: 'C:/repo/.tiller/worktrees/fix-1',
+      base: 'b',
+      tip: 't',
+    };
+    const { invokeFn, calls } = invokeAnswering({ 'task.list': [entry] });
     const tasks = await taskList('C:/repo', invokeFn);
-    expect(tasks).toEqual([{ task_id: 'fix-1', target_branch: 'master', base: 'b', tip: 't' }]);
+    expect(tasks).toEqual([entry]);
     expect(sentParams(calls)).toEqual([{ repo: 'C:/repo' }]);
   });
 

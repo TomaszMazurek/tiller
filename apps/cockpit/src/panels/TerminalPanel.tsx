@@ -11,6 +11,7 @@ import {
   type TerminalSessionDeps,
   type TerminalSurface,
 } from '../lib/useTerminalSession';
+import { useTerminalRequest } from '../lib/terminalRequest';
 import {
   subscribeTermExit,
   subscribeTermOutput,
@@ -95,6 +96,10 @@ export interface TerminalPanelProps extends IDockviewPanelProps {
 }
 
 export function TerminalPanel({ onActiveSessionChange, deps: depsProp }: TerminalPanelProps) {
+  // The P8a handoff arrives over the context channel, not props: dockview
+  // freezes the factory per panel, so a mounted terminal would never see
+  // a prop change (see lib/terminalRequest).
+  const { request: startRequest, consume: consumeRequest } = useTerminalRequest();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [toolId, setToolId] = useState(DEFAULT_TOOL_ID);
   // Free-text program — only the `custom` preset reads it. Starts empty,
@@ -126,6 +131,47 @@ export function TerminalPanel({ onActiveSessionChange, deps: depsProp }: Termina
   );
   const deps = depsProp ?? productionDeps;
   const { state, start, kill } = useTerminalSession(containerRef, deps);
+
+  // Control-flow truth for the start-request effect: status is read from
+  // here, not from the render closure, so the effect runs exactly once per
+  // request object (its only trigger) regardless of session transitions.
+  const statusRef = useRef(state.status);
+  statusRef.current = state.status;
+  // Set when a request arrived while a session was live — the operator is
+  // told to kill it consciously; Tiller never kills a session on its own.
+  const [statusHint, setStatusHint] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (startRequest === null) {
+      return;
+    }
+    const { program, cwd } = startRequest;
+    // Tool follows the request's program: the matching preset when there is
+    // one (pi), the custom field otherwise.
+    const preset = TOOL_PRESETS.find((entry) => entry.program === program);
+    if (preset !== undefined) {
+      setToolId(preset.id);
+    } else {
+      setToolId('custom');
+      setCustomProgram(program);
+    }
+    setCwd(cwd);
+    const busy = statusRef.current === 'running' || statusRef.current === 'starting';
+    if (busy) {
+      setStatusHint('Terminal busy — Kill first, then Start');
+    } else {
+      void start(program, cwd);
+    }
+    consumeRequest();
+  }, [startRequest, start, consumeRequest]);
+
+  // The busy hint has served its purpose once nothing is running anymore
+  // (Kill pressed / the program exited / a spawn failed back to idle).
+  useEffect(() => {
+    if (state.status === 'idle' || state.status === 'exited') {
+      setStatusHint(null);
+    }
+  }, [state.status]);
 
   // The lifted session id (App state): the reducer already nulls it on a
   // restart request, so the timeline resets with the terminal.
@@ -197,6 +243,11 @@ export function TerminalPanel({ onActiveSessionChange, deps: depsProp }: Termina
         >
           {sessionStatusLabel(state)}
         </span>
+        {statusHint !== null && (
+          <span className="terminal-panel__hint" data-testid="terminal-hint">
+            {statusHint}
+          </span>
+        )}
         {state.error !== null && (
           <span className="terminal-panel__error" data-testid="terminal-error">
             {state.error}

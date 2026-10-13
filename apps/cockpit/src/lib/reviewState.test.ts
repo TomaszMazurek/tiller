@@ -17,7 +17,13 @@ import {
 import type { CandidateDiff, TaskStatus, TaskSummary } from './taskApi';
 
 function task(id: string): TaskSummary {
-  return { task_id: id, target_branch: 'master', base: 'b', tip: 't' };
+  return {
+    task_id: id,
+    target_branch: 'master',
+    worktree_path: `C:/repo/.tiller/worktrees/${id}`,
+    base: 'b',
+    tip: 't',
+  };
 }
 
 function status(overrides: Partial<TaskStatus> = {}): TaskStatus {

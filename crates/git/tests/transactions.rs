@@ -148,16 +148,21 @@ fn create_rejects_invalid_ids_and_duplicates() {
 // ------------------------------------------------------- 2. list and open
 
 #[test]
-fn list_and_reopen_preserve_base() {
+fn list_returns_a_complete_entry_and_reopen_preserves_base() {
     let main = init_main();
-    {
-        let _ws = TaskWorkspace::create(&main.path, "task-a").unwrap();
-    }
+    let (_ws, cp) = task_with_checkpoint(&main, "task-a");
+    let head_branch = main.repo().head().unwrap().shorthand().unwrap().to_owned();
+
+    // P8a: the entry carries everything a task↔terminal handoff needs —
+    // pinned merge target, both ends of the review range, the worktree
+    // directory under {repo}/.tiller/worktrees/{id}.
     let listed = TaskWorkspace::list(&main.path).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].task_id, "task-a");
-    assert_eq!(listed[0].base_commit, main.head());
-    assert_eq!(listed[0].path, worktree_dir(&main.path, "task-a"));
+    assert_eq!(listed[0].target_branch, head_branch);
+    assert_eq!(listed[0].base, main.head());
+    assert_eq!(listed[0].tip, cp);
+    assert_eq!(listed[0].worktree_path, worktree_dir(&main.path, "task-a"));
 
     let reopened = TaskWorkspace::open(&main.path, "task-a").unwrap();
     assert_eq!(reopened.base_commit(), main.head());

@@ -1,12 +1,18 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RpcClientError } from '../lib/rpcClient';
-import { ReviewPanel, type ReviewDeps } from './ReviewPanel';
+import { ReviewPanel, type ReviewDeps, type ReviewPanelProps } from './ReviewPanel';
 import type { CandidateDiff, MergeOutcome, TaskStatus, TaskSummary } from '../lib/taskApi';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 function task(id: string): TaskSummary {
-  return { task_id: id, target_branch: 'master', base: 'aaaaaaa0', tip: '12345670' };
+  return {
+    task_id: id,
+    target_branch: 'master',
+    worktree_path: `C:/repo/.tiller/worktrees/${id}`,
+    base: 'aaaaaaa0',
+    tip: '12345670',
+  };
 }
 
 function candidateStatus(approval: TaskStatus['approval_state'] = null): TaskStatus {
@@ -75,8 +81,8 @@ function fakeDeps(overrides: Partial<ReviewDeps> = {}) {
 // dockview hands panels its props; the review panel uses none of them.
 const panelProps = {} as Parameters<typeof ReviewPanel>[0];
 
-function loadRepo(deps: ReviewDeps, repo = 'C:/repo') {
-  render(<ReviewPanel {...panelProps} deps={deps} />);
+function loadRepo(deps: ReviewDeps, repo = 'C:/repo', props: Partial<ReviewPanelProps> = {}) {
+  render(<ReviewPanel {...panelProps} deps={deps} {...props} />);
   fireEvent.change(screen.getByTestId('review-repo'), { target: { value: repo } });
   fireEvent.click(screen.getByTestId('review-load'));
 }
@@ -342,6 +348,46 @@ describe('ReviewPanel', () => {
     await waitFor(() => {
       expect(deps.create).toHaveBeenCalledWith('C:/repo', 'fix-3');
     });
+  });
+
+  it('Open in Terminal hands (pi, the task worktree path) to the host', async () => {
+    // P8a: the queue entry carries everything the handoff needs — the
+    // click is a pure callback, no rpc, no selection change.
+    const requestTerminal = vi.fn();
+    loadRepo(fakeDeps(), 'C:/repo', { requestTerminal });
+    await screen.findAllByTestId('review-task');
+
+    fireEvent.click(screen.getAllByTestId('review-open-terminal')[0]);
+
+    expect(requestTerminal).toHaveBeenCalledTimes(1);
+    expect(requestTerminal).toHaveBeenCalledWith('pi', 'C:/repo/.tiller/worktrees/fix-1');
+    expect(screen.getByTestId('review-terminal-note').textContent).toContain(
+      'C:/repo/.tiller/worktrees/fix-1'
+    );
+  });
+
+  it('a fresh task.create hands its worktree_path to the terminal', async () => {
+    // P6 NOTE closed: create's answer is not dropped anymore — the
+    // terminal opens on the brand-new worktree right away.
+    const requestTerminal = vi.fn();
+    const deps = fakeDeps({
+      create: vi.fn(async () => ({
+        task_id: 'fix-3',
+        worktree_path: 'C:/repo/.tiller/worktrees/fix-3',
+        target_branch: 'master',
+      })),
+    });
+    loadRepo(deps, 'C:/repo', { requestTerminal });
+    await screen.findByTestId('review-create');
+    fireEvent.change(screen.getByTestId('review-new-task'), { target: { value: 'fix-3' } });
+    fireEvent.click(screen.getByTestId('review-create'));
+
+    await waitFor(() => {
+      expect(requestTerminal).toHaveBeenCalledWith('pi', 'C:/repo/.tiller/worktrees/fix-3');
+    });
+    expect(screen.getByTestId('review-terminal-note').textContent).toContain(
+      'C:/repo/.tiller/worktrees/fix-3'
+    );
   });
 
   it('shows rpc failures as the toolbar error', async () => {

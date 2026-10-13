@@ -105,7 +105,7 @@ impl CockpitDispatcher {
     ///
     /// Wire shapes (params always objects, unknown fields rejected):
     ///
-    /// - `task.list {repo}` → `[{task_id, target_branch, base, tip}]`
+    /// - `task.list {repo}` → `[{task_id, target_branch, worktree_path, base, tip}]`
     /// - `task.create {repo, task_id}` → `{task_id, worktree_path, target_branch}`
     /// - `task.status {repo, task_id}` → `{status, candidate?, approval_state?, checkpoints_count}`
     /// - `task.checkpoint {repo, task_id, message}` → `{commit}`

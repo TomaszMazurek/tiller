@@ -221,14 +221,25 @@ pub struct CandidateDiff {
     pub byte_cap: usize,
 }
 
-/// A task workspace discovered by [`TaskWorkspace::list`].
+/// A task workspace discovered by [`TaskWorkspace::list`]. Complete by
+/// design (P8a): everything a task↔terminal handoff needs — the pinned
+/// merge target, both ends of the review range and the worktree's
+/// working directory — ships in one entry, no second open needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeEntry {
     pub task_id: String,
-    /// The worktree's working directory.
-    pub path: PathBuf,
+    /// The main-repo branch pinned at create time (the merge target).
+    pub target_branch: String,
+    /// The commit the task branched from.
     #[serde(with = "oid_serde")]
-    pub base_commit: Oid,
+    pub base: Oid,
+    /// The task branch's current tip (the worktree repo's HEAD).
+    #[serde(with = "oid_serde")]
+    pub tip: Oid,
+    /// The worktree's working directory
+    /// (`{repo}/.tiller/worktrees/{id}`) — where a session for the task
+    /// should be pointed.
+    pub worktree_path: PathBuf,
 }
 
 // ------------------------------------------------------------------ helpers
@@ -523,9 +534,11 @@ impl TaskWorkspace {
         })
     }
 
-    /// List all known task worktrees (entries whose worktree dir is gone —
-    /// e.g. removed outside Tiller — are skipped; call [`Self::discard`] to
-    /// clean up properly).
+    /// List all known task worktrees as complete [`WorktreeEntry`]s
+    /// (target branch, base, tip, worktree path). An entry that cannot be
+    /// resolved in full — worktree dir gone, metadata keys missing, task
+    /// branch deleted, worktree repo unreadable — is skipped, not fatal:
+    /// `list` is a *view*; call [`Self::discard`] to clean up properly.
     pub fn list(main_repo: &Path) -> Result<Vec<WorktreeEntry>, TransactionError> {
         let main = Repository::open(main_repo).map_err(git("open main repository"))?;
         let workdir = main.workdir().ok_or(TransactionError::BareRepository)?;
@@ -550,10 +563,35 @@ impl TaskWorkspace {
             else {
                 continue; // no recorded base → not a (consistent) Tiller task
             };
+            let Some(target_branch) = read_config_str(&main, &cfg_key_target_branch(&task_id))
+            else {
+                continue; // same consistency bar as `open`
+            };
+            if main
+                .find_branch(&branch_name(&task_id), BranchType::Local)
+                .is_err()
+            {
+                continue; // task branch gone → half-removed task
+            }
+            // Tip = the worktree repo's HEAD, the same authority every
+            // other tip read uses (`tip_commit`); an unreadable worktree
+            // is a skipped view entry, never a failed list.
+            let Ok(worktree) = Repository::open(entry.path()) else {
+                continue;
+            };
+            let Ok(tip) = worktree
+                .head()
+                .and_then(|head| head.peel_to_commit())
+                .map(|commit| commit.id())
+            else {
+                continue;
+            };
             entries.push(WorktreeEntry {
                 task_id,
-                path: entry.path(),
-                base_commit: base,
+                target_branch,
+                base,
+                tip,
+                worktree_path: entry.path(),
             });
         }
         entries.sort_by(|a, b| a.task_id.cmp(&b.task_id));

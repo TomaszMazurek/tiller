@@ -86,6 +86,10 @@ function messageOf(error: unknown): string {
 /** dockview hands panels their props; `deps` is the test seam. */
 export interface ReviewPanelProps extends IDockviewPanelProps {
   deps?: ReviewDeps;
+  /** Ask the host to open a terminal on (program, cwd) — App wires it to
+   *  the terminal panel (P8a task↔terminal handoff: "open the task
+   *  worktree in the terminal"). */
+  requestTerminal?: (program: string, cwd: string) => void;
 }
 
 /**
@@ -97,12 +101,23 @@ export interface ReviewPanelProps extends IDockviewPanelProps {
  * orchestrates load → (list + statuses) → diff of the selected task and
  * refreshes the whole view after every action.
  */
-export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
+export function ReviewPanel({ deps = defaultDeps, requestTerminal }: ReviewPanelProps) {
   const [state, dispatch] = useReducer(reviewReducer, initialReviewState);
 
   const [repoInput, setRepoInput] = useState('');
   const [newTaskId, setNewTaskId] = useState('');
   const [checkpointMessage, setCheckpointMessage] = useState('');
+  /** Last terminal request issued (a one-line breadcrumb so "Open in
+   * Terminal" is not a silent jump to another panel). */
+  const [terminalNote, setTerminalNote] = useState<string | null>(null);
+
+  const openInTerminal = useCallback(
+    (worktreePath: string) => {
+      requestTerminal?.('pi', worktreePath);
+      setTerminalNote(`terminal → ${worktreePath}`);
+    },
+    [requestTerminal],
+  );
 
   /** Load the queue: list + per-task statuses. The selected task's diff
    * follows from the `diffEpoch` effect below (single load path). */
@@ -331,7 +346,12 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
     const taskId = newTaskId.trim();
     if (repo === null || taskId === '') return;
     setNewTaskId('');
-    void runAction(repo, () => deps.create(repo, taskId));
+    void runAction(repo, async () => {
+      const created = await deps.create(repo, taskId);
+      // P6 NOTE closed: create's worktree_path is not dropped anymore —
+      // the fresh task's terminal opens right away (P8a).
+      openInTerminal(created.worktree_path);
+    });
   };
 
   const onCheckpoint = () => {
@@ -493,22 +513,40 @@ export function ReviewPanel({ deps = defaultDeps }: ReviewPanelProps) {
                 const entryBadge = approvalBadge(entryStatus);
                 return (
                   <li key={entry.task_id}>
-                    <button
-                      type="button"
-                      className={`review-task${entry.task_id === state.selectedTaskId ? ' review-task--selected' : ''}`}
-                      onClick={() => dispatch({ type: 'taskSelected', taskId: entry.task_id })}
-                      disabled={busy}
-                      data-testid="review-task"
-                    >
-                      <span className={`review-badge review-badge--${entryBadge}`}>
-                        {entryBadge}
-                      </span>
-                      <span className="review-task__id">{entry.task_id}</span>
-                    </button>
+                    <div className="review-queue__row">
+                      <button
+                        type="button"
+                        className={`review-task${entry.task_id === state.selectedTaskId ? ' review-task--selected' : ''}`}
+                        onClick={() => dispatch({ type: 'taskSelected', taskId: entry.task_id })}
+                        disabled={busy}
+                        data-testid="review-task"
+                      >
+                        <span className={`review-badge review-badge--${entryBadge}`}>
+                          {entryBadge}
+                        </span>
+                        <span className="review-task__id">{entry.task_id}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="review-task__terminal"
+                        onClick={() => openInTerminal(entry.worktree_path)}
+                        disabled={busy}
+                        title={`Open ${entry.worktree_path} in the terminal`}
+                        aria-label={`Open task ${entry.task_id} in terminal`}
+                        data-testid="review-open-terminal"
+                      >
+                        &gt;_
+                      </button>
+                    </div>
                   </li>
                 );
               })}
             </ul>
+          )}
+          {terminalNote !== null && (
+            <p className="review-panel__hint" data-testid="review-terminal-note">
+              {terminalNote}
+            </p>
           )}
         </aside>
 

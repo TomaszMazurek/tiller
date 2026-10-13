@@ -225,12 +225,25 @@ fn task_with_checkpoint(d: &CockpitDispatcher, repo: &Repo, task_id: &str) -> St
         .to_owned()
 }
 
+/// The repo HEAD at task-create time, hex — the expected `base` in list
+/// answers (nothing lands on the pinned branch before the capture).
+fn head_hex(repo: &Repo) -> String {
+    Repository::open(&repo.path)
+        .unwrap()
+        .head()
+        .unwrap()
+        .target()
+        .unwrap()
+        .to_string()
+}
+
 // ------------------------------------------------------------------ tests
 
 #[test]
 fn happy_path_create_checkpoint_diff_approve_merge() {
     let d = dispatcher();
     let repo = init_repo();
+    let base = head_hex(&repo);
     let commit = task_with_checkpoint(&d, &repo, "fix-1");
     assert_eq!(commit.len(), 40);
 
@@ -290,8 +303,14 @@ fn happy_path_create_checkpoint_diff_approve_merge() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["task_id"], "fix-1");
     assert_eq!(list[0]["target_branch"], "master");
-    assert_eq!(list[0]["base"], list[0]["base"]); // hex fields present
-    assert!(list[0]["tip"].as_str().unwrap().len() == 40);
+    // P8a: the entry carries the worktree path for the task↔terminal
+    // handoff ("open in terminal" reads it straight from the queue)
+    assert_eq!(
+        list[0]["worktree_path"],
+        serde_json::json!(repo.path.join(".tiller").join("worktrees").join("fix-1"))
+    );
+    assert_eq!(list[0]["base"], base);
+    assert_eq!(list[0]["tip"], commit);
 }
 
 #[test]

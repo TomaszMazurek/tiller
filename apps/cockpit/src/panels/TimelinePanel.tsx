@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { sessionObserve, subscribeSessionEntry } from '../lib/sessionApi';
 import { SessionEventGate } from '../lib/sessionEventGate';
+import { useActiveSession } from '../lib/activeSession';
 import type { SessionId } from '../lib/termApi';
 import {
   initialTimelineState,
@@ -26,8 +27,7 @@ const defaultDeps: TimelineDeps = {
 const TIME_TICK_MS = 15_000;
 
 export interface TimelinePanelProps extends IDockviewPanelProps {
-  /** The terminal session whose session file is observed. */
-  activeSessionId: SessionId | null;
+  /** Overrides the production session seams (tests fake them). */
   deps?: TimelineDeps;
 }
 
@@ -37,16 +37,22 @@ export interface TimelinePanelProps extends IDockviewPanelProps {
  * Thin by design — the state machine lives in `timeline.ts` (reducer) and
  * the backend (`session.observe` snapshot + `session.entry` stream).
  *
+ * The observed session id arrives over `ActiveSessionContext`, not
+ * props: dockview freezes the component function per panel, so a
+ * prop-threaded id would never reach a panel mounted before the session
+ * started (see `lib/activeSession.ts`).
+ *
  * Two races are closed structurally:
  *
- * - Live events can arrive before `activeSessionId` is known (a short
+ * - Live events can arrive before the session id is known (a short
  *   session may exit before the spawn rpc resolves) — they route
  *   through a [`SessionEventGate`] that buffers until the id is adopted.
  * - The snapshot rpc races event delivery; entries arriving while it is
  *   in flight are buffered by the reducer and merged after (see
  *   `timeline.ts`).
  */
-export function TimelinePanel({ activeSessionId, deps = defaultDeps }: TimelinePanelProps) {
+export function TimelinePanel({ deps = defaultDeps }: TimelinePanelProps) {
+  const { sessionId: activeSessionId } = useActiveSession();
   const [state, dispatch] = useReducer(timelineReducer, initialTimelineState);
   const gateRef = useRef<SessionEventGate<SessionEntryEvent> | null>(null);
 

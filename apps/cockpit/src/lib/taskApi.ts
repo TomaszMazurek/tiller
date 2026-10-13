@@ -16,6 +16,9 @@ import type { TermListenFn } from './termApi';
 export interface TaskSummary {
   task_id: string;
   target_branch: string;
+  /** The task worktree's directory — where a terminal session for the
+   * task opens (P8a task↔terminal handoff). */
+  worktree_path: string;
   base: string;
   tip: string;
 }

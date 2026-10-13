@@ -28,12 +28,16 @@ use crate::gates::{
 };
 use crate::term_host::EventSink;
 
-/// `task.list` entry: one task workspace with its pinned merge target and
-/// the two ends of its review range (hex oids).
+/// `task.list` entry: one task workspace with its pinned merge target,
+/// the two ends of its review range (hex oids) and the worktree's working
+/// directory — the task↔terminal handoff (P8a) reads it straight from
+/// the queue, no second `task.status`/`task.create` needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TaskSummary {
     pub task_id: String,
     pub target_branch: String,
+    /// The worktree's working directory (where the agent should be pointed).
+    pub worktree_path: PathBuf,
     pub base: String,
     pub tip: String,
 }
@@ -230,35 +234,23 @@ impl TaskHost {
         f(ws)
     }
 
-    /// All task workspaces of a repo. Entries that fail to open are
-    /// skipped, not fatal: `list` is a *view*, and a task removed while
-    /// listing must not blank the whole queue ([`TaskWorkspace::list`]
-    /// already skips dirs gone the same way).
+    /// All task workspaces of a repo. Pure pass-through of
+    /// [`TaskWorkspace::list`], which already resolves every field of each
+    /// entry and skips half-removed tasks (view semantics live there); no
+    /// per-entry workspace is reopened here.
     pub fn list(&self, repo: &str) -> Result<Vec<TaskSummary>, TransactionError> {
         let lock = self.lock_repo(repo);
         let _guard = lock.lock().expect("task lock poisoned");
-        let mut out = Vec::new();
-        for entry in TaskWorkspace::list(Path::new(repo))? {
-            let Ok(ws) = TaskWorkspace::open(Path::new(repo), &entry.task_id) else {
-                continue;
-            };
-            let tip = ws
-                .repository()
-                .head()
-                .and_then(|head| head.peel_to_commit())
-                .map(|commit| commit.id().to_string())
-                .map_err(|source| TransactionError::Git {
-                    op: "resolve task tip",
-                    source,
-                })?;
-            out.push(TaskSummary {
+        Ok(TaskWorkspace::list(Path::new(repo))?
+            .into_iter()
+            .map(|entry| TaskSummary {
                 task_id: entry.task_id,
-                target_branch: ws.target_branch().to_owned(),
-                base: entry.base_commit.to_string(),
-                tip,
-            });
-        }
-        Ok(out)
+                target_branch: entry.target_branch,
+                worktree_path: entry.worktree_path,
+                base: entry.base.to_string(),
+                tip: entry.tip.to_string(),
+            })
+            .collect())
     }
 
     /// Create a workspace. The task id is always caller-supplied and
