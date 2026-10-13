@@ -4,6 +4,7 @@
 mod dispatch;
 mod sandbox;
 mod session_tail;
+mod task_host;
 mod term_host;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use tiller_rpc::{Dispatcher, RequestId, RpcError, RpcRequest, RpcResponse, INVAL
 // Re-exported for the integration tests and the `pi_smoke` example.
 pub use dispatch::{CockpitDispatcher, SESSION_NOT_FOUND};
 pub use session_tail::{TimelineEntry, EVENT_ENTRY};
+pub use task_host::{TaskCreated, TaskHost, TaskPhase, TaskRebased, TaskStatusInfo, TaskSummary};
 pub use term_host::{
     EventSink, PtySessionFactory, SessionId, SessionManager, SessionStats, SpawnSpec, TermError,
     TermExit, EVENT_EXIT, EVENT_OUTPUT,
@@ -74,7 +76,7 @@ pub fn run() {
                 app: app.handle().clone(),
             });
             let manager = SessionManager::new(sink, cache_dir, Arc::new(PtySessionFactory));
-            app.manage(Arc::new(CockpitDispatcher::new(manager)));
+            app.manage(Arc::new(CockpitDispatcher::new(manager, TaskHost::new())));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![rpc])
@@ -93,7 +95,7 @@ mod tests {
     fn bridges_core_version_requests() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager));
+        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
         let raw = dispatch_json(dispatcher.as_ref(), r#"{"id":1,"method":"core.version"}"#);
         assert_eq!(raw.error, None);
         // The bridge must forward the dispatcher's answer verbatim; the
@@ -113,7 +115,7 @@ mod tests {
     fn malformed_json_maps_to_invalid_params() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager));
+        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
         let raw = dispatch_json(dispatcher.as_ref(), "not json at all");
         let error = raw.error.expect("error present");
         assert_eq!(error.code, INVALID_PARAMS);
@@ -124,7 +126,7 @@ mod tests {
     fn unknown_method_maps_to_method_not_found() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager));
+        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
         let raw = dispatch_json(dispatcher.as_ref(), r#"{"id":"a","method":"nope"}"#);
         let error = raw.error.expect("error present");
         assert_eq!(error.code, tiller_rpc::METHOD_NOT_FOUND);
@@ -135,7 +137,7 @@ mod tests {
     fn bridges_term_methods_with_base64_payloads() {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory);
-        let dispatcher = Arc::new(CockpitDispatcher::new(manager));
+        let dispatcher = Arc::new(CockpitDispatcher::new(manager, TaskHost::new()));
         let spawn = dispatch_json(
             dispatcher.as_ref(),
             r#"{"id":1,"method":"term.spawn","params":{"program":"fake","cwd":"C:/tmp"}}"#,

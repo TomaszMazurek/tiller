@@ -24,6 +24,16 @@ const BRANCH_PREFIX: &str = "tiller/task-";
 const AUTHOR_NAME: &str = "tiller";
 const AUTHOR_EMAIL: &str = "tiller@local";
 
+/// Total byte cap for one [`CandidateDiff`] response (≈256 KiB): enough for
+/// a meaningful multi-file review read without shipping megabytes over the
+/// rpc seam on every cockpit refresh.
+pub const DIFF_TOTAL_BYTE_CAP: usize = 256 * 1024;
+/// Per-file patch cap (≈64 KiB) inside a [`CandidateDiff`]: one huge
+/// generated/locked file must not starve the rest of the review.
+pub const DIFF_FILE_BYTE_CAP: usize = 64 * 1024;
+/// Marker appended when a cap cut a patch short.
+pub const DIFF_TRUNCATION_MARKER: &str = "… truncated …";
+
 fn cfg_key_base(task_id: &str) -> String {
     format!("tiller.worktree.{task_id}.base")
 }
@@ -150,6 +160,64 @@ pub struct WorktreeStatus {
     pub untracked: Vec<String>,
 }
 
+/// How one file changed between the base and the candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeType {
+    Added,
+    Deleted,
+    Modified,
+    Renamed,
+    /// Anything libgit2 can classify but Tiller has no dedicated name for
+    /// (typechange, copied, ignored…); shown as-is, never silently dropped.
+    Other,
+}
+
+/// One file's linear patch inside a [`CandidateDiff`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileDiff {
+    /// Path relative to the worktree; renames read `"old -> new"`.
+    pub path: String,
+    pub change_type: ChangeType,
+    /// Unified patch (context 3) including the `diff --git`/`---`/`+++`
+    /// header lines. Empty for binary files; a file past the total cap (or
+    /// one where not even a single line fit) ships **metadata only** —
+    /// empty patch, `truncated: true`; a cut-short patch ends with the
+    /// `… truncated …` marker.
+    pub patch: String,
+    /// Binary delta: flagged, content never ships.
+    pub binary: bool,
+    /// The patch was cut by a cap (per-file or total): refine with the
+    /// `path` filter, or accept that content was dropped.
+    pub truncated: bool,
+}
+
+/// Linear diff base commit → review candidate with byte caps.
+///
+/// Caps keep one giant diff from flooding the rpc seam (and the cockpit)
+/// on every refresh: [`DIFF_FILE_BYTE_CAP`] per file so a single huge
+/// generated file cannot starve the rest of the review,
+/// [`DIFF_TOTAL_BYTE_CAP`] for the whole payload. The caps are enforced
+/// **during** the diff walk — a file's lines are collected only while
+/// they fit its allowance, and once the total cap drains the walk stops;
+/// deltas past that point ship as metadata-only entries (`path`,
+/// `change_type`, `truncated: true`, no patch) so the file list stays
+/// complete. `truncated` (at either level) means "refine with the `path`
+/// filter", never "content is wrong": patches always start at the file's
+/// first change and are cut only at the tail. Marker bytes are included
+/// in `total_bytes`, so it can exceed `byte_cap` by at most one marker
+/// per cut file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateDiff {
+    pub files: Vec<FileDiff>,
+    /// Any file was cut (per-file cap) or dropped content (total cap).
+    pub truncated: bool,
+    /// Sum of shipped patch bytes (after caps, markers included).
+    pub total_bytes: usize,
+    /// The total cap that governed this response ([`DIFF_TOTAL_BYTE_CAP`]).
+    pub byte_cap: usize,
+}
+
 /// A task workspace discovered by [`TaskWorkspace::list`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeEntry {
@@ -186,6 +254,38 @@ fn validate_task_id(task_id: &str) -> Result<(), TransactionError> {
 
 fn branch_name(task_id: &str) -> String {
     format!("{BRANCH_PREFIX}{task_id}")
+}
+
+/// Display path for a diff delta: `"old -> new"` for renames, otherwise the
+/// surviving (or removed) side. Distinct for every delta in one diff, so it
+/// doubles as the bucket key while assembling per-file patches.
+fn display_path(delta: &git2::DiffDelta<'_>) -> String {
+    let old = delta
+        .old_file()
+        .path()
+        .and_then(Path::to_str)
+        .map(str::to_owned);
+    let new = delta
+        .new_file()
+        .path()
+        .and_then(Path::to_str)
+        .map(str::to_owned);
+    match (old, new) {
+        (Some(old), Some(new)) if old != new => format!("{old} -> {new}"),
+        (_, Some(new)) => new,
+        (Some(old), None) => old,
+        (None, None) => String::new(),
+    }
+}
+
+fn change_type(delta: &git2::DiffDelta<'_>) -> ChangeType {
+    match delta.status() {
+        git2::Delta::Added => ChangeType::Added,
+        git2::Delta::Deleted => ChangeType::Deleted,
+        git2::Delta::Modified => ChangeType::Modified,
+        git2::Delta::Renamed => ChangeType::Renamed,
+        _ => ChangeType::Other,
+    }
 }
 
 fn worktree_path(main_workdir: &Path, task_id: &str) -> PathBuf {
@@ -677,6 +777,209 @@ impl TaskWorkspace {
             candidate_commit: tip.id(),
             base_commit: self.base_commit,
             created_at: now_unix_ms(),
+        })
+    }
+
+    /// Linear diff of the review candidate against its base
+    /// (base tree → candidate tree, unified, context 3), capped and
+    /// filterable. **Pure object-database read**: it never touches the
+    /// worktree, so it is safe (and meaningful) even while the worktree is
+    /// dirty — uncommitted changes are simply not part of the candidate.
+    ///
+    /// `path` filters to a single pathspec (use it to refine a truncated
+    /// response); `None` diffs everything. Renames are reported when
+    /// libgit2's default rename detection finds them (path `"old -> new"`,
+    /// [`ChangeType::Renamed`]) — no similarity tuning. Binary files ship
+    /// without content (`binary: true`, empty patch). Byte caps and the
+    /// `… truncated …` marker: see [`CandidateDiff`]. Without checkpoints
+    /// there is no candidate to diff ([`TransactionError::NoCheckpoints`]).
+    pub fn candidate_diff(&self, path: Option<&str>) -> Result<CandidateDiff, TransactionError> {
+        let tip = self.tip_commit()?;
+        if tip.id() == self.base_commit {
+            return Err(TransactionError::NoCheckpoints);
+        }
+        let base_tree = self
+            .repo
+            .find_commit(self.base_commit)
+            .and_then(|c| c.tree())
+            .map_err(git("base tree"))?;
+        let tip_tree = tip.tree().map_err(git("candidate tree"))?;
+
+        let mut opts = git2::DiffOptions::new();
+        opts.context_lines(3);
+        if let Some(path) = path {
+            opts.pathspec(path);
+        }
+        let mut diff = self
+            .repo
+            .diff_tree_to_tree(Some(&base_tree), Some(&tip_tree), Some(&mut opts))
+            .map_err(git("diff base..candidate"))?;
+        // Default rename detection; a failure just leaves deltas un-renamed,
+        // which is a valid (if less pretty) answer.
+        let _ = diff.find_similar(None);
+
+        // One bucket per file, opened on its first header line; later
+        // header lines of the same delta (`index …`, `---`, `+++`) and all
+        // content lines append to the open bucket. Binary deltas keep the
+        // bucket (for `binary: true`) but never collect content.
+        //
+        // Budgets are enforced DURING the walk (P6 review MAJOR-2): a
+        // file's lines are collected only while they fit its allowance
+        // (per-file cap ∩ remaining total cap), and once the total cap is
+        // drained the walk is aborted outright — full patches are never
+        // materialised just to be cut afterwards. The header lines stay
+        // in the shipped patch (a real unified patch needs
+        // `diff --git`/`---`/`+++`, P6 review MAJOR-3) and count against
+        // the allowance like any other line.
+        struct OpenFile {
+            path: String,
+            change_type: ChangeType,
+            binary: bool,
+            text: String,
+            /// Bytes this file may still ship (per-file ∩ remaining total).
+            allowance: usize,
+            /// Cap hit mid-file: stop collecting, append the truncation
+            /// marker when the bucket is finalized.
+            cut: bool,
+        }
+
+        /// Charge `used` (the marker ships, so it counts), append the
+        /// marker when cut, push the entry.
+        fn finalize(
+            open: OpenFile,
+            files: &mut Vec<FileDiff>,
+            used: &mut usize,
+            truncated: &mut bool,
+        ) {
+            if open.binary {
+                files.push(FileDiff {
+                    path: open.path,
+                    change_type: open.change_type,
+                    patch: String::new(),
+                    binary: true,
+                    truncated: false,
+                });
+                return;
+            }
+            let patch = if !open.cut || open.text.is_empty() {
+                // Full patch — or a cap so small that not even one line fit:
+                // metadata only, no marker noise (the `truncated` flag
+                // carries the information).
+                open.text
+            } else if open.text.ends_with('\n') {
+                format!("{}{}", open.text, DIFF_TRUNCATION_MARKER)
+            } else {
+                format!("{}\n{}", open.text, DIFF_TRUNCATION_MARKER)
+            };
+            *truncated |= open.cut;
+            *used += patch.len();
+            files.push(FileDiff {
+                path: open.path,
+                change_type: open.change_type,
+                patch,
+                binary: false,
+                truncated: open.cut,
+            });
+        }
+
+        let mut files: Vec<FileDiff> = Vec::new();
+        let mut used = 0usize;
+        let mut truncated = false;
+        let mut open: Option<OpenFile> = None;
+        // Deltas that already got a full entry (content or binary); the
+        // metadata-only tail below starts after them.
+        let mut pushed = 0usize;
+        let mut aborted = false;
+
+        let walk = diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+            if line.origin_value() == git2::DiffLineType::FileHeader {
+                let path = display_path(&delta);
+                // Distinct display paths per delta tell "first header line
+                // of a new file" (open a bucket) from the continuation
+                // header lines of the file being walked (fall through to
+                // the shared append below).
+                if open.as_ref().is_none_or(|f| f.path != path) {
+                    if let Some(done) = open.take() {
+                        finalize(done, &mut files, &mut used, &mut truncated);
+                        pushed += 1;
+                    }
+                    let allowance =
+                        DIFF_FILE_BYTE_CAP.min(DIFF_TOTAL_BYTE_CAP.saturating_sub(used));
+                    if allowance == 0 {
+                        aborted = true;
+                        return false; // total cap drained: stop the walk here
+                    }
+                    open = Some(OpenFile {
+                        path,
+                        change_type: change_type(&delta),
+                        binary: delta.flags().is_binary(),
+                        text: String::new(),
+                        allowance,
+                        cut: false,
+                    });
+                }
+            }
+            let Some(file) = open.as_mut() else {
+                return true; // content before any header: nothing to attach to
+            };
+            if file.binary || file.cut {
+                return true; // binary never ships; a cut file stops collecting
+            }
+            // `content()` carries no +/-/space prefix; rebuild it from the
+            // line origin so the patch is a real unified diff ('='/<'/'>'
+            // are the "\ No newline" lines, 'F' the header lines — all
+            // arrive as-is, without a prefix).
+            let prefix = match line.origin() {
+                '+' => "+",
+                '-' => "-",
+                ' ' => " ",
+                _ => "",
+            };
+            let mut piece = String::with_capacity(prefix.len() + line.content().len());
+            piece.push_str(prefix);
+            piece.push_str(&String::from_utf8_lossy(line.content()));
+            if file.text.len() + piece.len() > file.allowance {
+                file.cut = true; // this line would cross the allowance
+            } else {
+                file.text.push_str(&piece);
+            }
+            true
+        });
+        match walk {
+            Ok(()) => {}
+            // GIT_EUSER: the callback returned false — our own budget stop.
+            Err(e) if e.code() == ErrorCode::User => {}
+            Err(e) => {
+                return Err(TransactionError::Git {
+                    op: "print patch",
+                    source: e,
+                })
+            }
+        }
+        if let Some(done) = open.take() {
+            finalize(done, &mut files, &mut used, &mut truncated);
+            pushed += 1;
+        }
+        if aborted {
+            truncated = true;
+            // Deltas past the aborted walk never got content — keep their
+            // metadata (path, change type, `truncated: true`) so the file
+            // list stays complete; nothing else ships for them.
+            for delta in diff.deltas().skip(pushed) {
+                files.push(FileDiff {
+                    path: display_path(&delta),
+                    change_type: change_type(&delta),
+                    patch: String::new(),
+                    binary: false,
+                    truncated: true,
+                });
+            }
+        }
+        Ok(CandidateDiff {
+            files,
+            truncated,
+            total_bytes: used,
+            byte_cap: DIFF_TOTAL_BYTE_CAP,
         })
     }
 

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { DockviewReact, type DockviewReadyEvent, type IDockviewPanelProps } from 'dockview-react';
 import { StatusBar } from './components/StatusBar';
-import { DiffPanel } from './panels/PlaceholderPanels';
+import { ReviewPanel } from './panels/ReviewPanel';
 import { TerminalPanel } from './panels/TerminalPanel';
 import { TimelinePanel } from './panels/TimelinePanel';
 import type { SessionId } from './lib/termApi';
@@ -24,7 +24,7 @@ export function App() {
       timeline: (props: IDockviewPanelProps) => (
         <TimelinePanel {...props} activeSessionId={activeSessionId} />
       ),
-      diff: DiffPanel,
+      review: ReviewPanel,
     }),
     [activeSessionId],
   );
@@ -39,9 +39,9 @@ export function App() {
       position: { referencePanel: 'terminal', direction: 'right' },
     });
     api.addPanel({
-      id: 'diff',
-      component: 'diff',
-      title: 'Diff',
+      id: 'review',
+      component: 'review',
+      title: 'Review',
       position: { referencePanel: 'timeline', direction: 'below' },
     });
   }, []);

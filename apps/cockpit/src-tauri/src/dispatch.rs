@@ -1,6 +1,8 @@
 //! The cockpit dispatcher: `core.*` delegated to [`CoreDispatcher`], the
-//! `term.*` surface served by the session manager, and `session.observe`
-//! for the timeline snapshot.
+//! `term.*` surface served by the session manager, `session.observe`
+//! for the timeline snapshot, and the `task.*` review surface over
+//! `tiller-git` (see [`CockpitDispatcher::dispatch_task`] for its wire
+//! shapes and [`task_error`] for its error-code convention).
 //!
 //! Wire shapes (params always an object; unknown fields rejected so a typo
 //! cannot silently drop a write):
@@ -22,16 +24,21 @@
 //! *server-error* range (-32000..-32099), chosen over reusing
 //! INVALID_PARAMS so the UI can tell "malformed request" apart from the
 //! benign race "the program exited under you" without parsing messages.
+//! `task.*` failures use the same range from -32010 down, one stable number
+//! per `TransactionError` variant (see [`task_error`]).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tiller_git::TransactionError;
 use tiller_rpc::{
-    CoreDispatcher, Dispatcher, RpcError, RpcRequest, RpcResponse, INVALID_PARAMS, METHOD_NOT_FOUND,
+    CoreDispatcher, Dispatcher, RpcError, RpcRequest, RpcResponse, INTERNAL_ERROR, INVALID_PARAMS,
+    METHOD_NOT_FOUND,
 };
 
 use crate::session_tail::TimelineEntry;
+use crate::task_host::{TaskHost, TaskSummary};
 use crate::term_host::{base64_decode, SessionId, SessionManager, SpawnSpec, TermError};
 
 /// Application error: the session id is not (or no longer) live.
@@ -41,13 +48,15 @@ pub const SESSION_NOT_FOUND: i64 = -32001;
 pub struct CockpitDispatcher {
     core: CoreDispatcher,
     terms: SessionManager,
+    tasks: TaskHost,
 }
 
 impl CockpitDispatcher {
-    pub fn new(terms: SessionManager) -> Self {
+    pub fn new(terms: SessionManager, tasks: TaskHost) -> Self {
         Self {
             core: CoreDispatcher,
             terms,
+            tasks,
         }
     }
 
@@ -87,6 +96,149 @@ impl CockpitDispatcher {
             }
         };
         answer.map(|result| RpcResponse::ok(id, result))
+    }
+
+    /// The `task.*` surface: review transactions over `tiller-git`
+    /// (per-repo serialized, open-per-call — see `task_host.rs`).
+    ///
+    /// Wire shapes (params always objects, unknown fields rejected):
+    ///
+    /// - `task.list {repo}` → `[{task_id, target_branch, base, tip}]`
+    /// - `task.create {repo, task_id}` → `{task_id, worktree_path, target_branch}`
+    /// - `task.status {repo, task_id}` → `{status, candidate?, approval_state?, checkpoints_count}`
+    /// - `task.checkpoint {repo, task_id, message}` → `{commit}`
+    /// - `task.diff {repo, task_id, path?}` → `CandidateDiff` (snake_case)
+    /// - `task.approve {repo, task_id}` → `{approved}` (hex oid)
+    /// - `task.merge {repo, task_id}` → `MergeOutcome` (snake_case);
+    ///   **no auto-discard after `merged`** — the UI offers Cleanup
+    ///   (`task.discard`) explicitly
+    /// - `task.rebase {repo, task_id}` → `{ok, new_tip}`
+    /// - `task.reset {repo, task_id}` → `{}`
+    /// - `task.discard {repo, task_id}` → `{}`
+    fn dispatch_task(&self, method: &str, req: RpcRequest) -> Result<RpcResponse, RpcError> {
+        let id = req.id.clone();
+        let answer = match method {
+            "list" => self.task_list(req.params).and_then(|v| to_json(method, v)),
+            "create" => self
+                .task_create(req.params)
+                .and_then(|v| to_json(method, v)),
+            "status" => self
+                .task_status(req.params)
+                .and_then(|v| to_json(method, v)),
+            "checkpoint" => self
+                .task_checkpoint(req.params)
+                .map(|commit| serde_json::json!({ "commit": commit })),
+            "diff" => self.task_diff(req.params).and_then(|v| to_json(method, v)),
+            "approve" => self
+                .task_approve(req.params)
+                .map(|approved| serde_json::json!({ "approved": approved })),
+            "merge" => self.task_merge(req.params).and_then(|v| to_json(method, v)),
+            "rebase" => self
+                .task_rebase(req.params)
+                .and_then(|v| to_json(method, v)),
+            "reset" => self.task_reset(req.params).map(|()| serde_json::json!({})),
+            "discard" => self
+                .task_discard(req.params)
+                .map(|()| serde_json::json!({})),
+            other => {
+                return Err(RpcError::new(
+                    METHOD_NOT_FOUND,
+                    format!("unknown method: task.{other}"),
+                ))
+            }
+        };
+        answer.map(|result| RpcResponse::ok(id, result))
+    }
+
+    fn task_list(&self, params: serde_json::Value) -> Result<Vec<TaskSummary>, RpcError> {
+        let params: RepoParams = parse_params("task.list", params)?;
+        require_non_empty("task.list", "repo", &params.repo)?;
+        self.tasks.list(&params.repo).map_err(task_error)
+    }
+
+    fn task_create(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<crate::task_host::TaskCreated, RpcError> {
+        let params: TaskCreateParams = parse_params("task.create", params)?;
+        require_non_empty("task.create", "repo", &params.repo)?;
+        // task_id: no auto-generation on purpose — naming a task is the
+        // UI's decision; charset validation is tiller-git's (InvalidTaskId).
+        require_non_empty("task.create", "task_id", &params.task_id)?;
+        self.tasks
+            .create(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    fn task_status(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<crate::task_host::TaskStatusInfo, RpcError> {
+        let params: TaskRefParams = parse_params("task.status", params)?;
+        require_non_empty("task.status", "repo", &params.repo)?;
+        self.tasks
+            .status(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    fn task_checkpoint(&self, params: serde_json::Value) -> Result<String, RpcError> {
+        let params: CheckpointParams = parse_params("task.checkpoint", params)?;
+        require_non_empty("task.checkpoint", "repo", &params.repo)?;
+        require_non_empty("task.checkpoint", "message", &params.message)?;
+        self.tasks
+            .checkpoint(&params.repo, &params.task_id, &params.message)
+            .map_err(task_error)
+    }
+
+    fn task_diff(&self, params: serde_json::Value) -> Result<tiller_git::CandidateDiff, RpcError> {
+        let params: DiffParams = parse_params("task.diff", params)?;
+        require_non_empty("task.diff", "repo", &params.repo)?;
+        self.tasks
+            .diff(&params.repo, &params.task_id, params.path.as_deref())
+            .map_err(task_error)
+    }
+
+    fn task_approve(&self, params: serde_json::Value) -> Result<String, RpcError> {
+        let params: TaskRefParams = parse_params("task.approve", params)?;
+        require_non_empty("task.approve", "repo", &params.repo)?;
+        self.tasks
+            .approve(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    fn task_merge(&self, params: serde_json::Value) -> Result<tiller_git::MergeOutcome, RpcError> {
+        let params: TaskRefParams = parse_params("task.merge", params)?;
+        require_non_empty("task.merge", "repo", &params.repo)?;
+        self.tasks
+            .merge(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    fn task_rebase(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<crate::task_host::TaskRebased, RpcError> {
+        let params: TaskRefParams = parse_params("task.rebase", params)?;
+        require_non_empty("task.rebase", "repo", &params.repo)?;
+        self.tasks
+            .rebase(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    fn task_reset(&self, params: serde_json::Value) -> Result<(), RpcError> {
+        let params: TaskRefParams = parse_params("task.reset", params)?;
+        require_non_empty("task.reset", "repo", &params.repo)?;
+        self.tasks
+            .reset(&params.repo, &params.task_id)
+            .map_err(task_error)
+    }
+
+    fn task_discard(&self, params: serde_json::Value) -> Result<(), RpcError> {
+        let params: TaskRefParams = parse_params("task.discard", params)?;
+        require_non_empty("task.discard", "repo", &params.repo)?;
+        self.tasks
+            .discard(&params.repo, &params.task_id)
+            .map_err(task_error)
     }
 
     fn session_observe(&self, params: serde_json::Value) -> Result<Vec<TimelineEntry>, RpcError> {
@@ -164,10 +316,14 @@ impl Dispatcher for CockpitDispatcher {
             None => match req.method.strip_prefix("session.").map(str::to_string) {
                 // …the session.* timeline surface likewise…
                 Some(rest) => self.dispatch_session(&rest, req),
-                // …everything else (core.* today, later core surfaces) goes
-                // to the core dispatcher verbatim, including its
-                // METHOD_NOT_FOUND.
-                None => self.core.dispatch(req),
+                None => match req.method.strip_prefix("task.").map(str::to_string) {
+                    // …the task.* review surface over tiller-git…
+                    Some(rest) => self.dispatch_task(&rest, req),
+                    // …everything else (core.* today, later core surfaces) goes
+                    // to the core dispatcher verbatim, including its
+                    // METHOD_NOT_FOUND.
+                    None => self.core.dispatch(req),
+                },
             },
         }
     }
@@ -191,6 +347,25 @@ fn decode_data(method: &str, data: &str) -> Result<Vec<u8>, RpcError> {
     base64_decode(data).map_err(|e| invalid_params(method, &format!("`data` is not base64: {e}")))
 }
 
+fn require_non_empty(method: &str, field: &str, value: &str) -> Result<(), RpcError> {
+    if value.trim().is_empty() {
+        return Err(invalid_params(
+            method,
+            &format!("`{field}` must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
+fn to_json<T: Serialize>(method: &str, value: T) -> Result<serde_json::Value, RpcError> {
+    serde_json::to_value(value).map_err(|e| {
+        RpcError::new(
+            INTERNAL_ERROR,
+            format!("{method}: serialization failed: {e}"),
+        )
+    })
+}
+
 fn term_error(error: TermError) -> RpcError {
     match error {
         TermError::SessionGone(id) => {
@@ -201,6 +376,53 @@ fn term_error(error: TermError) -> RpcError {
             format!("term operation failed: {message}"),
         ),
     }
+}
+
+/// Application error codes for `task.*`: one stable negative number per
+/// [`TransactionError`] variant, in the JSON-RPC *server-error* range
+/// (-32000..-32099) right after [`SESSION_NOT_FOUND`] (-32001).
+///
+/// Convention (P6): the numeric `code` pins the **variant** for generic
+/// JSON-RPC tooling; the variant's stable string code
+/// ([`TransactionError::code`]) rides in `data.code` and is what the UI
+/// branches on; conflict detail paths (`rebase_conflict`, `dirty_worktree`)
+/// ride in `data.paths`. Numbers follow the variant order in `error.rs`,
+/// with the two internal classes (git2/io, -32031/-32032) last so the
+/// -3201x/-3202x block stays purely semantic. Changing an assigned number
+/// is a wire break — add new variants after the last one instead.
+fn task_error(error: TransactionError) -> RpcError {
+    let (code, str_code, paths): (i64, &str, Option<Vec<String>>) = match &error {
+        TransactionError::InvalidTaskId(_) => (-32010, "invalid_task_id", None),
+        TransactionError::BareRepository => (-32011, "bare_repository", None),
+        TransactionError::NoHeadCommit => (-32012, "no_head_commit", None),
+        TransactionError::AlreadyExists(_) => (-32013, "already_exists", None),
+        TransactionError::UnknownTask(_) => (-32014, "unknown_task", None),
+        TransactionError::NothingToCommit => (-32015, "nothing_to_commit", None),
+        TransactionError::NoCheckpoints => (-32016, "no_checkpoints", None),
+        TransactionError::NoApproval => (-32017, "no_approval", None),
+        TransactionError::StaleApproval(_) => (-32018, "stale_approval", None),
+        TransactionError::MainWorktreeDirty => (-32019, "main_worktree_dirty", None),
+        TransactionError::MainDetachedHead => (-32020, "main_detached_head", None),
+        TransactionError::DirtyWorktree { details } => {
+            (-32021, "dirty_worktree", Some(details.clone()))
+        }
+        TransactionError::RebaseConflict { paths } => {
+            (-32022, "rebase_conflict", Some(paths.clone()))
+        }
+        TransactionError::Git { op, source } => {
+            (-32031, "git_error", Some(vec![format!("{op}: {source}")]))
+        }
+        TransactionError::Io { op, source } => {
+            (-32032, "io_error", Some(vec![format!("{op}: {source}")]))
+        }
+    };
+    let mut data = serde_json::json!({ "code": str_code });
+    if let Some(paths) = paths {
+        data["paths"] = serde_json::json!(paths);
+    }
+    let mut error = RpcError::new(code, format!("task: {error}"));
+    error.data = Some(data);
+    error
 }
 
 #[derive(Deserialize)]
@@ -253,6 +475,43 @@ struct ObserveParams {
     session_id: SessionId,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoParams {
+    repo: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskCreateParams {
+    repo: String,
+    task_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskRefParams {
+    repo: String,
+    task_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointParams {
+    repo: String,
+    task_id: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiffParams {
+    repo: String,
+    task_id: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +521,10 @@ mod tests {
     fn dispatcher() -> (CockpitDispatcher, std::sync::Arc<FakeFactory>) {
         let factory = FakeFactory::new();
         let (manager, _sink, _root) = manager_with(factory.clone());
-        (CockpitDispatcher::new(manager), factory)
+        (
+            CockpitDispatcher::new(manager, crate::task_host::TaskHost::new()),
+            factory,
+        )
     }
 
     fn dispatch_ok(
@@ -566,5 +828,110 @@ mod tests {
 
         let error = dispatch_err(&dispatcher, "nope.what", serde_json::json!({}));
         assert_eq!(error.code, METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn task_error_codes_are_stable_per_variant() {
+        use tiller_git::TransactionError;
+
+        // The numeric code pins the variant; data.code carries the stable
+        // string code the UI branches on. Both halves of every mapping are
+        // pinned here — changing a number is a wire break (see task_error).
+        let cases: Vec<(TransactionError, i64, &str)> = vec![
+            (
+                TransactionError::InvalidTaskId("x".into()),
+                -32010,
+                "invalid_task_id",
+            ),
+            (TransactionError::BareRepository, -32011, "bare_repository"),
+            (TransactionError::NoHeadCommit, -32012, "no_head_commit"),
+            (
+                TransactionError::AlreadyExists("x".into()),
+                -32013,
+                "already_exists",
+            ),
+            (
+                TransactionError::UnknownTask("x".into()),
+                -32014,
+                "unknown_task",
+            ),
+            (
+                TransactionError::NothingToCommit,
+                -32015,
+                "nothing_to_commit",
+            ),
+            (TransactionError::NoCheckpoints, -32016, "no_checkpoints"),
+            (TransactionError::NoApproval, -32017, "no_approval"),
+            (
+                TransactionError::StaleApproval(tiller_git::ApprovalState::Valid),
+                -32018,
+                "stale_approval",
+            ),
+            (
+                TransactionError::MainWorktreeDirty,
+                -32019,
+                "main_worktree_dirty",
+            ),
+            (
+                TransactionError::MainDetachedHead,
+                -32020,
+                "main_detached_head",
+            ),
+            (
+                TransactionError::DirtyWorktree {
+                    details: vec!["uncommitted: x".into()],
+                },
+                -32021,
+                "dirty_worktree",
+            ),
+            (
+                TransactionError::RebaseConflict {
+                    paths: vec!["a.txt".into()],
+                },
+                -32022,
+                "rebase_conflict",
+            ),
+            (
+                TransactionError::Git {
+                    op: "op",
+                    source: git2::Error::from_str("boom"),
+                },
+                -32031,
+                "git_error",
+            ),
+            (
+                TransactionError::Io {
+                    op: "op",
+                    source: std::io::Error::other("boom"),
+                },
+                -32032,
+                "io_error",
+            ),
+        ];
+        for (error, code, str_code) in cases {
+            let rpc = task_error(error);
+            assert_eq!(rpc.code, code, "code {code}");
+            let data = rpc.data.clone().expect("data present");
+            assert_eq!(data["code"], str_code, "data.code {code}");
+        }
+        // conflict detail paths ride in data.paths
+        let rpc = task_error(TransactionError::RebaseConflict {
+            paths: vec!["a.txt".into()],
+        });
+        assert_eq!(rpc.data.unwrap()["paths"], serde_json::json!(["a.txt"]));
+    }
+
+    #[test]
+    fn task_surface_validates_params_and_reports_unknown_methods() {
+        let (dispatcher, _factory) = dispatcher();
+        let error = dispatch_err(&dispatcher, "task.nope", serde_json::json!({}));
+        assert_eq!(error.code, METHOD_NOT_FOUND);
+        assert!(error.message.contains("task.nope"));
+        let error = dispatch_err(&dispatcher, "task.list", serde_json::json!({ "repo": "" }));
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(error.message.contains("repo"));
+        // A task host exists in the dispatcher (per-repo serialization is
+        // part of the construction contract, see task_host.rs).
+        let _: &TaskHost = &dispatcher.tasks;
     }
 }

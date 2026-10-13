@@ -94,6 +94,7 @@ mod workspace;
 
 pub use error::TransactionError;
 pub use workspace::{
-    Approval, ApprovalState, CheckpointInfo, MergeOutcome, ReviewCandidate, TaskWorkspace,
-    WorktreeEntry, WorktreeStatus,
+    Approval, ApprovalState, CandidateDiff, ChangeType, CheckpointInfo, FileDiff, MergeOutcome,
+    ReviewCandidate, TaskWorkspace, WorktreeEntry, WorktreeStatus, DIFF_FILE_BYTE_CAP,
+    DIFF_TOTAL_BYTE_CAP, DIFF_TRUNCATION_MARKER,
 };

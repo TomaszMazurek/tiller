@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cockpit_lib::{
-    CockpitDispatcher, EventSink, PtySessionFactory, SessionManager, SpawnSpec, SESSION_NOT_FOUND,
+    CockpitDispatcher, EventSink, PtySessionFactory, SessionManager, SpawnSpec, TaskHost,
+    SESSION_NOT_FOUND,
 };
 use tiller_rpc::{Dispatcher, RequestId, RpcRequest};
 
@@ -112,7 +113,7 @@ fn dispatcher() -> (CockpitDispatcher, Arc<RecordingSink>) {
         Instant::now().elapsed().as_nanos()
     ));
     let manager = SessionManager::new(sink.clone(), sandbox_root, Arc::new(PtySessionFactory));
-    (CockpitDispatcher::new(manager), sink)
+    (CockpitDispatcher::new(manager, TaskHost::new()), sink)
 }
 
 fn call(

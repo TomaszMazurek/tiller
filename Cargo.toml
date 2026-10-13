@@ -16,3 +16,6 @@ portable-pty = "0.9"
 libc = "0.2"
 base64 = "0.22"
 tiller-term = { path = "crates/term", version = "0.1.0" }
+tiller-git = { path = "crates/git", version = "0.1.0" }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+tempfile = "3"

@@ -341,10 +341,13 @@ name = "cockpit"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "git2",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
+ "tiller-git",
  "tiller-rpc",
  "tiller-term",
 ]
