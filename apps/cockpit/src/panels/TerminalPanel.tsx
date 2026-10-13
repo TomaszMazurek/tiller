@@ -20,7 +20,28 @@ import {
   termWrite,
 } from '../lib/termApi';
 
-const DEFAULT_PROGRAM = 'pi';
+/**
+ * Hardcoded tool dropdown entries (P6b): the operator picks a tool
+ * instead of typing a program path — no configuration, no paths. `custom`
+ * is the only way to a free-text program (it reveals the input field).
+ */
+interface ToolPreset {
+  id: string;
+  label: string;
+  /** Spawn target; `null` for `custom` — the free-text field takes over. */
+  program: string | null;
+}
+
+const TOOL_PRESETS: readonly ToolPreset[] = [
+  // `pi` keeps the bare name: the backend's sandbox heuristic (P3a)
+  // matches on it; cmd.exe/powershell.exe correctly get no sandbox.
+  { id: 'pi', label: 'pi', program: 'pi' },
+  { id: 'powershell', label: 'PowerShell', program: 'powershell.exe' },
+  { id: 'cmd', label: 'Command Prompt', program: 'cmd.exe' },
+  { id: 'custom', label: 'Custom…', program: null },
+];
+
+const DEFAULT_TOOL_ID = 'pi';
 
 /**
  * The xterm-backed surface: the production implementation of the hook's
@@ -64,17 +85,25 @@ function createXtermSurface(container: HTMLElement): TerminalSurface {
 export interface TerminalPanelProps extends IDockviewPanelProps {
   /** Reports the live session id upward (the timeline observes it). */
   onActiveSessionChange?: (sessionId: import('../lib/termApi').SessionId | null) => void;
+  /** Overrides the production session seams (tests fake them: xterm cannot
+   *  mount in jsdom — it needs a canvas). */
+  deps?: TerminalSessionDeps;
 }
 
-export function TerminalPanel({ onActiveSessionChange }: TerminalPanelProps) {
+export function TerminalPanel({ onActiveSessionChange, deps: depsProp }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [program, setProgram] = useState(DEFAULT_PROGRAM);
+  const [toolId, setToolId] = useState(DEFAULT_TOOL_ID);
+  // Free-text program — only the `custom` preset reads it. Starts empty,
+  // so Start stays disabled until the operator names the program.
+  const [customProgram, setCustomProgram] = useState('');
   // No machine-specific default (a wrong cwd fails the spawn on any other
   // machine): the operator names the project directory; Start stays
-  // disabled until both fields are filled.
+  // disabled until the tool (for `custom`: a typed program) and cwd are set.
   const [cwd, setCwd] = useState('');
+  const preset = TOOL_PRESETS.find((entry) => entry.id === toolId) ?? TOOL_PRESETS[0];
+  const program = preset.program ?? customProgram;
 
-  const deps = useMemo<TerminalSessionDeps>(
+  const productionDeps = useMemo<TerminalSessionDeps>(
     () => ({
       spawn: termSpawn,
       write: termWrite,
@@ -91,6 +120,7 @@ export function TerminalPanel({ onActiveSessionChange }: TerminalPanelProps) {
     }),
     [],
   );
+  const deps = depsProp ?? productionDeps;
   const { state, start, kill } = useTerminalSession(containerRef, deps);
 
   // The lifted session id (App state): the reducer already nulls it on a
@@ -107,17 +137,35 @@ export function TerminalPanel({ onActiveSessionChange }: TerminalPanelProps) {
   return (
     <div className="terminal-panel">
       <div className="terminal-panel__toolbar">
-        <label className="terminal-panel__field">
-          program
-          <input
-            value={program}
-            onChange={(event) => setProgram(event.target.value)}
-            spellCheck={false}
+        <label className="terminal-panel__field terminal-panel__field--tool">
+          tool
+          <select
+            value={toolId}
+            onChange={(event) => setToolId(event.target.value)}
             disabled={running || busy}
-            data-testid="terminal-program"
-          />
+            data-testid="terminal-tool"
+          >
+            {TOOL_PRESETS.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
         </label>
-        <label className="terminal-panel__field">
+        {preset.program === null && (
+          <label className="terminal-panel__field terminal-panel__field--program">
+            program
+            <input
+              value={customProgram}
+              onChange={(event) => setCustomProgram(event.target.value)}
+              placeholder="custom program"
+              spellCheck={false}
+              disabled={running || busy}
+              data-testid="terminal-program"
+            />
+          </label>
+        )}
+        <label className="terminal-panel__field terminal-panel__field--cwd">
           cwd
           <input
             value={cwd}
